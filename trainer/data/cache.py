@@ -14,11 +14,27 @@ from PIL import Image
 from safetensors.torch import load_file
 
 from .bucket import BucketManager
+from .masks import center_crop_box
 
 Image.MAX_IMAGE_PIXELS = None  # dataset images legitimately exceed the decompression-bomb guard
 
 CACHE_SUFFIX = "_trainer.safetensors"
 CACHE_VERSION = "mageflow-1"
+
+# Storage precision of newly written caches. The VAE runs in the training dtype either way and the
+# trainer computes in float32 either way; this only decides the bytes on disk. float16 halves them
+# (a 1024px latent is 2 MB in float32) at ~5e-4 relative rounding -- far below the VAE's own
+# reconstruction error, and what diffusion-pipe has always used for its caches.
+LATENT_DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+
+
+def storable(latent: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """`latent` in the storage dtype, or float32 if that would overflow (float16 tops out at
+    65504; a non-finite cache would poison every step that draws it)."""
+    out = latent.to(dtype)
+    if dtype != torch.float32 and not torch.isfinite(out).all():
+        return latent.to(torch.float32)
+    return out
 
 # `<stem>_WWWWxHHHH_trainer.safetensors` -- the bucket is recoverable from the name alone, which is
 # what lets a dataset run from latents after its source images have been deleted.
@@ -38,24 +54,44 @@ def cache_path(image_path: str | Path, bucket: tuple[int, int]) -> Path:
     return p.with_name(f"{p.stem}_{bucket[0]:04d}x{bucket[1]:04d}{CACHE_SUFFIX}")
 
 
+# Solid backgrounds for transparent images (the Studio's "Flatten transparent images" palette), chosen by file name.
+FLATTEN_PALETTE = ((255, 255, 255), (0, 0, 0), (128, 128, 128), (200, 40, 40), (50, 90, 200), (60, 160, 70),
+                   (240, 210, 60), (240, 160, 190), (130, 80, 180), (240, 140, 40), (120, 80, 45), (60, 200, 200))
+
+
+def to_rgb(img: Image.Image, key: str | Path) -> Image.Image:
+    """`img` as RGB. A transparent image is composited onto a solid palette colour (the same one for the same `key`)
+    instead of dropping its alpha, which would expose the colours hidden under the transparent pixels -- noise the model
+    would learn as the background. Datasets from the Studio are flattened (and tagged) before training; this is the
+    safety net for any that are not."""
+    if img.mode == "P" and "transparency" in img.info or img.mode in ("PA", "LA"):
+        img = img.convert("RGBA")
+    if "A" in img.getbands() and img.getchannel("A").getextrema()[0] < 255:
+        colour = FLATTEN_PALETTE[int(hashlib.md5(Path(key).stem.encode("utf-8")).hexdigest()[:8], 16) % len(FLATTEN_PALETTE)]
+        background = Image.new("RGBA", img.size, colour + (255,))
+        background.alpha_composite(img.convert("RGBA"))
+        return background.convert("RGB")
+    return img.convert("RGB")
+
+
 def load_and_crop(image_path: str | Path, bucket_mgr: BucketManager) -> tuple[Image.Image, dict]:
     """Resize to the bucket's aspect then centre-crop. Never pads."""
-    img = Image.open(image_path).convert("RGB")
+    with Image.open(image_path) as raw:
+        img = to_rgb(raw, image_path)
     w, h = img.size
     bucket, resized, ar_error = bucket_mgr.select_bucket(w, h)
 
     if bucket[0] <= 0 or bucket[1] <= 0:
         raise ValueError(f"{image_path}: degenerate bucket {bucket} for source {w}x{h}")
 
-    img = img.resize(resized, Image.LANCZOS)
-    left = (resized[0] - bucket[0]) // 2
-    top = (resized[1] - bucket[1]) // 2
-    img = img.crop((left, top, left + bucket[0], top + bucket[1]))
+    # The box is shared with `masks.load_mask`, which must crop a painted mask exactly like this.
+    box = center_crop_box(resized, bucket)
+    img = img.resize(resized, Image.LANCZOS).crop(box)
 
     return img, {
         "bucket": bucket,
         "original_size": (w, h),
-        "crop_ltrb": (left, top, left + bucket[0], top + bucket[1]),
+        "crop_ltrb": box,
         "ar_error": ar_error,
     }
 
@@ -72,11 +108,13 @@ def image_to_tensor(img: Image.Image) -> torch.Tensor:
 class LatentCacher:
     """Encode Mage-VAE posterior means without additional scaling or normalization."""
 
-    def __init__(self, vae, device: torch.device | str = "cuda", dtype: torch.dtype = torch.bfloat16, flux2_vae: bool = False, provenance: dict | None = None, cache_validation: str = "warn"):
+    def __init__(self, vae, device: torch.device | str = "cuda", dtype: torch.dtype = torch.bfloat16, flux2_vae: bool = False, provenance: dict | None = None, cache_validation: str = "warn",
+                 storage_dtype: torch.dtype = torch.float32):
         self.vae = vae.to(device).eval()
         self.device = torch.device(device)
         self.dtype = dtype
         self.flux2_vae = flux2_vae
+        self.storage_dtype = storage_dtype
         self.provenance = (dict(provenance, encode_dtype=str(next(self.vae.parameters()).dtype).removeprefix("torch."))
                            if provenance is not None else None)
         self.cache_validation = cache_validation
@@ -133,13 +171,15 @@ class LatentCacher:
         latents = self.encode_tensor(torch.cat([row[3] for row in prepared], dim=0))
         written = []
         for (image_path, out, meta, _), latent in zip(prepared, latents):
-            atomic_save({"latents": latent.contiguous()}, out, self._metadata(image_path, meta))
+            atomic_save({"latents": storable(latent, self.storage_dtype).contiguous()}, out, self._metadata(image_path, meta))
             written.append((out, meta))
         return written
 
 
 def load_cached_latent(path: str | Path) -> torch.Tensor:
-    tensor = load_file(path)["latents"]
+    # Always float32 out, whatever was stored: a dataset part-converted to float16 must still
+    # stack into one batch, and training computes in float32 regardless.
+    tensor = load_file(path)["latents"].float()
     parsed = parse_cache_filename(path)
     if tensor.ndim != 4 or tensor.shape[:2] != (128, 1):
         raise ValueError(f"{path}: expected Mage-VAE latents [128,1,h,w]; rebuild cache")
