@@ -561,6 +561,10 @@ def load_config(path: str | Path) -> Config:
             sections[f.name] = _build(_SECTIONS[f.name], data, f.name)
 
     cfg = Config(**sections)
+    if cfg.flow.cabal_shift:
+        from .timestep_distribution import effective_shift
+        for resolution in cfg.dataset.tiers:
+            effective_shift(cfg.flow, resolution / 16, resolution / 16)
     cfg.resolution_schedule.validate(cfg)
     if cfg.resolution_schedule.enabled:
         cfg.train.save_every_epochs = None

@@ -608,8 +608,23 @@ use weights-only continuation to start a different LR plan.
 ## Timestep sampling and detail losses
 
 **Method → Flow Matching** shows a live timestep probability plot. Adjust the
-sampler, sigmoid scale, or shift to preview its distribution. `t=0` is clean and
+sampler, mean, standard deviation, or shift to preview its distribution. `t=0` is clean and
 `t=1` is pure noise; the plot shows sampling frequency, not loss weighting.
+
+Logit-normal defaults to mean 0 and standard deviation 1; the standard deviation
+retains the TOML key `sigmoid_scale`. Mean −0.2 and std 1.5 reproduce the SDXL
+trainer's `lognorm_front` parameters. `flow.normal_low_snr=true` fills deficient
+probability bins at `t ≥ 0.95` toward a uniform baseline for any sampler, while
+respecting curriculum ranges and the MOSS sampler's discrete grid.
+
+`flow.cabal_shift=true` makes `flow.shift` the 1024px anchor for Cabal's
+resolution-dependent curve. `flow.cabal_shift_offset` defaults to 0 and adds an
+offset scaled by effective image resolution / 1024. Cabal and `flux_shift` are
+mutually exclusive. Both use each training image's actual dimensions; Electron
+automatically shows colored isometric curves for the configured resolution tiers
+when either is enabled. PySide keeps its 2D preview with latent-grid controls.
+The Kohaku MOSS sampler retains its shift locks, including Cabal, while allowing
+Normal low SNR.
 
 The presets use **logit-normal sampling with shift 1**. The optional `moss`
 sampler implements Kohaku's static MOSS recipe:

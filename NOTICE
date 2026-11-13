@@ -27,6 +27,14 @@ A full copy of the Apache License 2.0 as distributed with Aozora is kept at
 The remaining GUI modules -- `app.py`, `schema.py`, `bridge.py`, `fields.py`,
 `metrics.py` -- are original to this project.
 
+Cabal timestep sampling
+-----------------------
+Resolution-dependent Cabal shifting and low-SNR probability redistribution in
+trainer/training/timestep_distribution.py are adapted from Anzhc's
+cabal-SDXL-trainer, train_utils/training_utils.py and train_utils/timesteps_util.py:
+https://github.com/Anzhc/cabal-SDXL-trainer (GPL-3.0).
+The redistribution is generalized to all BluFlow distributions and native MOSS grids.
+
 Mage model modules: Microsoft Mage, MIT; see trainer/modeling/modules/LICENSE.Mage.
 Experimental RTI Read/Write design: Eduard Zamfir, MIT (2026); see
 trainer/experimental/LICENSE.RTI and https://github.com/eduardzamfir/RTI.

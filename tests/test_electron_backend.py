@@ -143,7 +143,9 @@ def test_headless_coverage_and_renderer_kinds():
         timeout=60,
         check=True,
     )
-    assert json.loads(result.stdout) == dict(ok=True, fields=197, qtImported=False)
+    assert json.loads(result.stdout) == dict(
+        ok=True, fields=len(descriptors()["fields"]), qtImported=False
+    )
     definition = descriptors()
     assert bridge.missing_ui_keys(definition["fields"]) == ([], [])
     from trainer.gui.schema import layout_keys

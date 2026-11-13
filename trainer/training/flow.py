@@ -41,6 +41,10 @@ def apply_flux_shift(t: torch.Tensor, latent_h: int, latent_w: int) -> torch.Ten
 class FlowConfig:
     timestep_sample_method: str = "logit_normal"  # "logit_normal" | "uniform" | "moss"
     sigmoid_scale: float = 1.0
+    logit_mean: float = 0.0
+    normal_low_snr: bool = False
+    cabal_shift: bool = False
+    cabal_shift_offset: float = 0.0
     moss_mu: float = -1.09
     moss_std: float = 0.95
     moss_cutoff: float = 0.95
@@ -64,6 +68,16 @@ class FlowConfig:
     hf_high_noise_power: float = 1.0
 
     def __post_init__(self):
+        for name in ('normal_low_snr', 'cabal_shift'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'flow.{name} must be a boolean')
+        for name in ('logit_mean', 'cabal_shift_offset'):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f'flow.{name} must be finite')
+        if self.cabal_shift and self.flux_shift:
+            raise ValueError('Cabal and Flux timestep shifts are mutually exclusive')
+        if self.cabal_shift and self.shift is None:
+            raise ValueError('Cabal shift needs a positive flow.shift anchor at 1024px')
         if not 0 < self.dual_timestep_mask_ratio <= 0.5:
             raise ValueError("dual_timestep_mask_ratio must be in (0, 0.5]")
         if self.shift is not None and self.flux_shift:
@@ -72,7 +86,7 @@ class FlowConfig:
         # shift=0 and goes negative below it. Either way the batch trains at t=0, where the input is
         # the clean latent and the velocity target is unpredictable noise: loss parks at 1.0 and the
         # run learns nothing while looking perfectly healthy. Omit the key for no shift.
-        if self.shift is not None and self.shift <= 0.0:
+        if self.shift is not None and (not math.isfinite(self.shift) or self.shift <= 0.0):
             raise ValueError(
                 f"flow.shift must be > 0, got {self.shift}. shift={self.shift} does not mean "
                 f"'no shift' -- it collapses every timestep to 0, which pins the loss at 1.0 and "
@@ -82,9 +96,9 @@ class FlowConfig:
         if self.timestep_sample_method not in ("logit_normal", "uniform", "moss"):
             raise ValueError(f"unknown timestep_sample_method: {self.timestep_sample_method}")
         if self.timestep_sample_method == "moss":
-            if self.sigmoid_scale != 1.0 or self.shift != 1.0 or self.flux_shift:
+            if self.sigmoid_scale != 1.0 or self.shift != 1.0 or self.flux_shift or self.cabal_shift:
                 raise ValueError("Kohaku MOSS sampling locks sigmoid_scale=1, shift=1 and "
-                                 "flux_shift=false; use moss_std for its distribution width")
+                                 "flux_shift=false, cabal_shift=false; use moss_std for its distribution width")
         if not math.isfinite(self.moss_mu):
             raise ValueError("flow.moss_mu must be finite")
         if not math.isfinite(self.moss_std) or self.moss_std <= 0:
@@ -110,7 +124,7 @@ class FlowConfig:
                 f"timestep_sample_method='logit_normal'; the uniform sampler has no sigmoid to "
                 f"scale. Set timestep_sample_method='logit_normal' or drop sigmoid_scale."
             )
-        if self.sigmoid_scale <= 0.0:
+        if not math.isfinite(self.sigmoid_scale) or self.sigmoid_scale <= 0.0:
             raise ValueError(f"flow.sigmoid_scale must be > 0, got {self.sigmoid_scale}")
         if self.phase_mapping not in ("rescale", "truncate"):
             raise ValueError(
@@ -148,7 +162,10 @@ def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device, generat
     draw_device = generator.device if generator is not None else 'cpu'
     if cfg.timestep_sample_method == "logit_normal":
         t = torch.randn((n,), device=draw_device, generator=generator).to(device)
-        t = torch.sigmoid(t * cfg.sigmoid_scale)
+        logits = t * cfg.sigmoid_scale
+        if cfg.logit_mean:
+            logits = logits + cfg.logit_mean
+        t = torch.sigmoid(logits)
     else:
         t = torch.rand((n,), device=draw_device, generator=generator).to(device)
         if cfg.timestep_sample_method == "moss":
@@ -158,7 +175,10 @@ def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device, generat
     # Shift is applied *before* any range mapping, matching the reference implementation. The
     # other order is not equivalent -- shift is nonlinear, so shifting a rescaled t bends the
     # distribution differently inside the phase than rescaling a shifted one.
-    if cfg.shift is not None:
+    if cfg.cabal_shift:
+        from .timestep_distribution import effective_shift
+        t = apply_static_shift(t, effective_shift(cfg, latent_h, latent_w))
+    elif cfg.shift is not None:
         t = apply_static_shift(t, cfg.shift)
     elif cfg.flux_shift:
         t = apply_flux_shift(t, latent_h, latent_w)
@@ -197,26 +217,43 @@ def sample_timesteps(
     """
     lo, hi = (0.0, 1.0) if t_range is None else t_range
 
+    def finish(values):
+        if cfg.normal_low_snr:
+            from .timestep_distribution import probability_law
+            values = probability_law(cfg, latent_h, latent_w, t_range).adjust(values, generator)
+        return values.to(dtype)
+
     if quantile is not None:
+        if cfg.normal_low_snr:
+            from .timestep_distribution import probability_law
+            law = probability_law(cfg, latent_h, latent_w, t_range)
+            if law.move_probability:
+                value = law.quantile(quantile)
+                return torch.full((batch_size,), value, device=device, dtype=dtype)
         # A deterministic probe, not a sample. Placed by linear interpolation in both mappings:
         # "the q-th quantile of a truncated distribution" would need the CDF of whatever
         # distribution is configured, and an eval probe only has to be *consistent*, not
         # distribution-faithful. Documented rather than silently differing from training.
         base = torch.full((batch_size,), quantile, device=device)
         if cfg.timestep_sample_method == "logit_normal":
-            base = torch.sigmoid(torch.distributions.normal.Normal(0, 1).icdf(base)
-                                 * cfg.sigmoid_scale)
+            logits = torch.distributions.normal.Normal(0, 1).icdf(base) * cfg.sigmoid_scale
+            if cfg.logit_mean:
+                logits = logits + cfg.logit_mean
+            base = torch.sigmoid(logits)
         elif cfg.timestep_sample_method == "moss":
             from .moss_timesteps import inverse_cdf
             base = inverse_cdf(base, cfg)
-        if cfg.shift is not None:
+        if cfg.cabal_shift:
+            from .timestep_distribution import effective_shift
+            base = apply_static_shift(base, effective_shift(cfg, latent_h, latent_w))
+        elif cfg.shift is not None:
             base = apply_static_shift(base, cfg.shift)
         elif cfg.flux_shift:
             base = apply_flux_shift(base, latent_h, latent_w)
         return (base * (hi - lo) + lo).to(dtype)
 
     if t_range is None or cfg.phase_mapping == "rescale":
-        return (_draw(cfg, batch_size, latent_h, latent_w, device, generator) * (hi - lo) + lo).to(dtype)
+        return finish(_draw(cfg, batch_size, latent_h, latent_w, device, generator) * (hi - lo) + lo)
 
     # Truncate by rejection. Draws are scalars, so rejected ones cost nothing measurable; the
     # bound exists so a range with negligible probability fails loudly instead of hanging.
@@ -225,7 +262,7 @@ def sample_timesteps(
         c = _draw(cfg, batch_size * 4, latent_h, latent_w, device, generator)
         out = torch.cat([out, c[(c >= lo) & (c <= hi)]])
         if out.numel() >= batch_size:
-            return out[:batch_size].to(dtype)
+            return finish(out[:batch_size])
     raise RuntimeError(
         f"flow.phase_mapping='truncate' could not fill a batch from t_range [{lo}, {hi}]: that "
         f"range holds almost no probability under {cfg.timestep_sample_method} "

@@ -652,6 +652,8 @@ class TrainingGUI(QtWidgets.QWidget):
         self._last_adapter_selection = (flat.get("adapter.kind"), flat.get("adapter.lycoris_algo"))
         self._lock_quant_preset()
         self._lock_moss_sampling()
+        self._last_flow_selection = tuple(self.editors[k].get() for k in
+            ('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'))
         self._refresh()
 
     def collect(self) -> dict:
@@ -788,7 +790,7 @@ class TrainingGUI(QtWidgets.QWidget):
     def _lock_moss_sampling(self):
         if self.editors["flow.timestep_sample_method"].get() != "moss":
             return
-        locked = {"flow.sigmoid_scale": 1.0, "flow.shift": 1.0, "flow.flux_shift": False}
+        locked = {"flow.sigmoid_scale": 1.0, "flow.shift": 1.0, "flow.flux_shift": False, "flow.cabal_shift": False}
         changed = any(self.editors[key].get() != value for key, value in locked.items())
         self._applying = True
         try:
@@ -808,6 +810,9 @@ class TrainingGUI(QtWidgets.QWidget):
         previous['resolution_schedule.enabled'] = getattr(self, '_last_resolution_enabled', False)
         previous['optimizer.kind'] = getattr(self, '_last_optimizer_kind', flat.get('optimizer.kind'))
         previous['adapter.kind'], previous['adapter.lycoris_algo'] = getattr(self, '_last_adapter_selection', (None, None))
+        for key, value in zip(('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'),
+                             getattr(self, '_last_flow_selection', ('logit_normal', False, False))):
+            previous[key] = value
         normalized = normalize(flat, previous)
         self._applying = True
         try:
@@ -819,6 +824,8 @@ class TrainingGUI(QtWidgets.QWidget):
         self._last_resolution_enabled = bool(normalized.get('resolution_schedule.enabled'))
         self._last_optimizer_kind = normalized.get('optimizer.kind')
         self._last_adapter_selection = (normalized.get('adapter.kind'), normalized.get('adapter.lycoris_algo'))
+        self._last_flow_selection = tuple(normalized.get(k) for k in
+            ('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'))
         self._refresh()
 
     def _use_windows_attention(self):

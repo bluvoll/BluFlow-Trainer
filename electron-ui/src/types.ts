@@ -24,6 +24,13 @@ export type QueueEntry = {
   status: string;
   error: string;
 };
+export type TimestepDistribution = {
+  probabilities: number[];
+  median: number;
+  high_noise: number;
+  shift: number;
+};
+export type ResolutionDistribution = TimestepDistribution & { resolution: number };
 export type State = {
   previewGrid: [number, number];
   flat: Flat;
@@ -47,7 +54,9 @@ export type State = {
     enabled: Record<string, boolean>;
     advisories: [string, string][];
     experimental: boolean;
-    distribution: { probabilities: number[]; median: number; high_noise: number } | null;
+    distribution: TimestepDistribution | null;
+    resolutionDistributions: ResolutionDistribution[];
+    timestepError: string;
     stages: Flat[] | null;
     windowsRepair: boolean;
   };

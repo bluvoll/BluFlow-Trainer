@@ -4,6 +4,7 @@ import { chooseCategory, command, edit, error, subscribeEvents, useStore } from 
 import FieldRow from './Fields';
 import MetricsPanel from './Metrics';
 import SettingsGrid from './SettingsGrid';
+import TimestepPreview from './TimestepPreview';
 
 export function Navigation() {
   const { data, state, category } = useStore((value) => ({
@@ -160,7 +161,9 @@ export function Settings() {
                 {group.keys.map((key) => (
                   <div key={key}>
                     <FieldRow field={data.fields[key]} />
-                    {group.title === 'Flow Matching' && key === 'flow.use_ot' && <Distribution />}
+                    {group.title === 'Flow Matching' && key === 'flow.use_ot' && (
+                      <TimestepPreview />
+                    )}
                   </div>
                 ))}
                 {group.keys.includes('quant.matmul_tuning') && (
@@ -181,68 +184,6 @@ export function Settings() {
         ))}
       </SettingsGrid>
       {!matching.length && <div className="empty-panel">No matching settings.</div>}
-    </div>
-  );
-}
-
-function Distribution() {
-  const { state } = useStore((value) => ({ state: value.state })),
-    d = state?.validation.distribution;
-  const [grid, setGrid] = useState<[number, number]>(() => state?.previewGrid || [64, 64]);
-  useEffect(() => {
-    const timer = setTimeout(
-      () => void command('preview.timestep', { height: grid[0], width: grid[1] }).catch(error),
-      180,
-    );
-    return () => clearTimeout(timer);
-  }, [grid[0], grid[1]]);
-  if (!d)
-    return (
-      <div className="distribution muted">Fix the timestep settings to update the preview.</div>
-    );
-  const max = Math.max(...d.probabilities, 1e-8);
-  return (
-    <div className="distribution" aria-label="Timestep distribution">
-      {state?.flat['flow.flux_shift'] && (
-        <div className="preview-grid" title="Preview only. Does not change training resolution.">
-          <span>Preview latent H × W</span>
-          {grid.map((value, index) => (
-            <input
-              key={index}
-              aria-label={index === 0 ? 'Preview latent height' : 'Preview latent width'}
-              type="number"
-              min="1"
-              max="512"
-              value={value}
-              onChange={(event) =>
-                setGrid(
-                  (previous) =>
-                    previous.map((v, i) =>
-                      i === index ? Math.max(1, Math.min(512, Number(event.target.value) || 1)) : v,
-                    ) as [number, number],
-                )
-              }
-            />
-          ))}
-        </div>
-      )}
-      <div className="distribution-bars">
-        {d.probabilities.map((p, i) => (
-          <div
-            key={i}
-            title={`${(i / d.probabilities.length).toFixed(2)}–${((i + 1) / d.probabilities.length).toFixed(2)}: ${(p * 100).toFixed(2)}%`}
-            style={{ height: (p / max) * 100 + '%' }}
-          />
-        ))}
-      </div>
-      <div className="distribution-labels">
-        <span>Clean · 0</span>
-        <span>Median {d.median.toFixed(3)}</span>
-        <span>Noise · 1</span>
-      </div>
-      <small>
-        {(d.high_noise * 100).toFixed(1)}% at high noise · preview before curriculum mapping
-      </small>
     </div>
   );
 }

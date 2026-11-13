@@ -80,7 +80,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   const fields = await page.evaluate(
     async () => Object.keys((await window.bluflow.request('bootstrap')).fields).length,
   );
-  assert.equal(fields, 197);
+  assert.equal(fields, 201);
   const qkvSelect = page.locator('[data-field="train.moss_qkv_format"] select');
   assert.equal(
     await qkvSelect.inputValue(),
@@ -208,6 +208,138 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
     );
   assert.ok(columns >= 2 && columns < 6, 'Sections reflow into fewer columns in a narrower panel');
   await page.screenshot({ path: path.join(artifacts, 'settings-reflow.png') });
+  await page.getByRole('button', { name: /^Dataset.*sections/ }).click();
+  await page.locator('[data-field="dataset.resolutions"] input').fill('512, 768, 1024');
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat['dataset.resolutions']?.length === 3,
+  );
+  await page.getByRole('button', { name: /^Method.*sections/ }).click();
+  await page.locator('[data-field="flow.logit_mean"] input').fill('-0.2');
+  await page.locator('[data-field="flow.sigmoid_scale"] input').fill('1.5');
+  await page.locator('[data-field="flow.normal_low_snr"] input').check();
+  await page.getByTestId('timestep-2d').waitFor();
+  await page.locator('[data-field="flow.cabal_shift"] input').check();
+  await page.getByTestId('timestep-3d').waitFor();
+  await page
+    .getByLabel('Resolution shifts', { exact: true })
+    .getByText('512px · shift 2.750', { exact: true })
+    .waitFor();
+  await page
+    .getByLabel('Resolution shifts', { exact: true })
+    .getByText('1024px · shift 6.000', { exact: true })
+    .waitFor();
+  await page.locator('.distribution').scrollIntoViewIfNeeded();
+  const hoverPoint = await page.getByTestId('timestep-3d').evaluate((canvas) => {
+    const rect = canvas.getBoundingClientRect(),
+      ctx = canvas.getContext('2d');
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const sx = canvas.width / rect.width,
+      sy = canvas.height / rect.height;
+    for (let y = Math.ceil(40 * sy); y < canvas.height - 65 * sy; y++) {
+      for (let x = Math.ceil(75 * sx); x < canvas.width * 0.65; x++) {
+        const i = (y * canvas.width + x) * 4;
+        if (
+          Math.abs(pixels[i] - 180) +
+            Math.abs(pixels[i + 1] - 157) +
+            Math.abs(pixels[i + 2] - 223) <
+          10
+        )
+          return { x: rect.left + x / sx, y: rect.top + y / sy };
+      }
+    }
+    return null;
+  });
+  assert.ok(hoverPoint, 'The 512px distribution curve is painted');
+  await page.mouse.move(hoverPoint.x, hoverPoint.y);
+  await page
+    .getByRole('tooltip')
+    .getByText(/512px · shift 2.750/)
+    .waitFor();
+  await page.screenshot({ path: path.join(artifacts, 'timesteps-cabal.png') });
+  await page
+    .locator('.distribution')
+    .screenshot({ path: path.join(artifacts, 'timesteps-cabal-detail.png') });
+  await page.mouse.move(0, 0);
+  await page.setViewportSize({ width: 1080, height: 900 });
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector('[data-testid="timestep-3d"]');
+    return (
+      canvas &&
+      Math.abs(canvas.width - Math.round(canvas.getBoundingClientRect().width * devicePixelRatio)) <
+        2
+    );
+  });
+  await page.locator('.distribution').scrollIntoViewIfNeeded();
+  await page
+    .locator('.distribution')
+    .screenshot({ path: path.join(artifacts, 'timesteps-compact.png') });
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.locator('[data-field="flow.cabal_shift_offset"] input').fill('-10');
+  await page
+    .locator('.distribution')
+    .getByText(/Cabal shift must be positive/)
+    .waitFor();
+  assert.equal(
+    await page.getByTestId('timestep-3d').count(),
+    0,
+    'Invalid settings clear the old curves',
+  );
+  await page.locator('[data-field="flow.cabal_shift_offset"] input').fill('0.25');
+  await page
+    .getByLabel('Resolution shifts', { exact: true })
+    .getByText('1024px · shift 6.250', { exact: true })
+    .waitFor();
+  await page.locator('[data-field="flow.flux_shift"] input').check();
+  await page.waitForFunction(async () => {
+    const state = await window.bluflow.request('state');
+    return (
+      state.flat['flow.flux_shift'] &&
+      !state.flat['flow.cabal_shift'] &&
+      state.flat['flow.shift'] === null
+    );
+  });
+  await page
+    .getByLabel('Resolution shifts', { exact: true })
+    .getByText('1024px · shift 3.158', { exact: true })
+    .waitFor();
+  await page.locator('.distribution').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(artifacts, 'timesteps-flux.png') });
+  await page.getByRole('button', { name: /^Dataset.*sections/ }).click();
+  await page.locator('[data-field="dataset.resolutions"] input').fill('768');
+  await page.waitForFunction(
+    async () =>
+      (await window.bluflow.request('state')).validation.resolutionDistributions.length === 1,
+  );
+  await page.getByRole('button', { name: /^Method.*sections/ }).click();
+  await page.waitForFunction(
+    () => document.querySelectorAll('[aria-label="Resolution shifts"] > span').length === 1,
+  );
+  assert.equal(
+    await page.getByLabel('Resolution shifts', { exact: true }).locator('span').count(),
+    1,
+  );
+  await page.locator('[data-field="flow.flux_shift"] input').uncheck();
+  await page.getByTestId('timestep-2d').waitFor();
+  await page
+    .locator('[data-field="flow.timestep_sample_method"] select')
+    .selectOption({ label: 'uniform' });
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat['flow.sigmoid_scale'] === 1,
+  );
+  assert.ok(await page.locator('[data-field="flow.normal_low_snr"] input').isEnabled());
+  await page
+    .locator('[data-field="flow.timestep_sample_method"] select')
+    .selectOption({ label: 'moss' });
+  await page.waitForFunction(
+    () => document.querySelector('[data-field="flow.cabal_shift"]')?.disabled === true,
+  );
+  assert.ok(await page.locator('[data-field="flow.normal_low_snr"] input').isEnabled());
+  assert.ok(await page.locator('[data-field="flow.logit_mean"] input').isDisabled());
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  assert.match(
+    fs.readFileSync(path.join(configs, 'electron-smoke-edited.toml'), 'utf8'),
+    /normal_low_snr = true/,
+  );
   await page.getByText('Utilities', { exact: true }).click();
   await page.getByRole('button', { name: 'Resize LoRA rank (SVD)', exact: true }).click();
   await page.getByRole('dialog', { name: 'Resize LoRA rank', exact: true }).waitFor();
@@ -382,7 +514,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
     'Closing waits for pending final metrics export',
   );
   console.log(
-    'Electron smoke passed: all 197 editors, config save, immutable queue, subsets, search, preferences, four utility outputs, graph hover/zoom/pan/reset, console history/clear, offscreen PNG, compact layout and floating-panel persistence.',
+    'Electron smoke passed: all 201 editors, sampling controls and resolution previews, config save, immutable queue, subsets, search, preferences, four utility outputs, graph hover/zoom/pan/reset, console history/clear, offscreen PNG, compact layout and floating-panel persistence.',
   );
 })()
   .catch(async (error) => {

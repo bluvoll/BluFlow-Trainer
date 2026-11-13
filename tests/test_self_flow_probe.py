@@ -53,6 +53,8 @@ class SelfFlowProbeTests(unittest.TestCase):
         cfg.adapter.kind = 'none'
         cfg.train.batch_size = 1
         cfg.train.pack_resolutions = cfg.train.cache_text_embeddings = True
+        import sys
+        cfg.train.attention_backend = 'flash_attn_2' if sys.platform == 'win32' else 'torch_varlen'
         cfg.flow.dual_timestep = cfg.self_flow.enabled = True
         validate_model_options(cfg)
         cfg.train.batch_size = 2

@@ -1375,12 +1375,16 @@ class Trainer:
         f = cfg.flow
         flow_bits = [f.timestep_sample_method]
         if f.timestep_sample_method == "logit_normal":
-            flow_bits.append(f"sigmoid_scale {f.sigmoid_scale}")
+            flow_bits.append(f"mean {f.logit_mean:g}, std {f.sigmoid_scale:g}")
         elif f.timestep_sample_method == "moss":
             flow_bits.append(f"Kohaku static recipe mu={f.moss_mu:g}, std={f.moss_std:g}, "
                              f"cutoff={f.moss_cutoff:g}, uniform={f.moss_uniform_mix:g}, "
                              f"p_full={f.moss_p_full:g}, grid={f.moss_steps}")
-        flow_bits.append("flux_shift" if f.flux_shift else f"shift {f.shift if f.shift else 'none'}")
+        flow_bits.append(f"cabal_shift (1024px anchor={f.shift:g}, offset={f.cabal_shift_offset:g})"
+                         if f.cabal_shift else "flux_shift" if f.flux_shift
+                         else f"shift {f.shift if f.shift else 'none'}")
+        if f.normal_low_snr:
+            flow_bits.append('normal_low_snr ON')
         if f.dual_timestep:
             teacher_label = 'Self-Flow EMA teacher' if cfg.self_flow.enabled else 'no teacher'
             flow_bits.append(f"dual timestep ON (mask={f.dual_timestep_mask_ratio:g}; {teacher_label})")

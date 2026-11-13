@@ -374,6 +374,50 @@ Omitting `resume_mode` retains `"exact"`, which still requires saved training
 state. Weights-only continuation deliberately does not keep old optimizer
 moments or inherit a completed run's near-zero scheduled LR.
 
+## Timestep sampling controls
+
+Logit-normal sampling exposes **Mean** (default 0) and **Standard deviation**
+(default 1). The standard deviation keeps its existing `sigmoid_scale` TOML key;
+the draw is `sigmoid(logit_mean + sigmoid_scale * normal_noise)`. Mean −0.2 and
+std 1.5 reproduce the SDXL reference's `lognorm_front` parameters without adding
+a new sampler or preset.
+
+```toml
+[flow]
+timestep_sample_method = "logit_normal"
+logit_mean = -0.2
+sigmoid_scale = 1.5
+normal_low_snr = true
+shift = 6.0
+cabal_shift = true
+cabal_shift_offset = 0.0
+```
+
+Normal low SNR is available for every sampler. It moves lower-timestep donor
+mass into deficient bins at `t >= 0.95`, toward the uniform baseline. It does not
+remove existing tail mass, exceed curriculum bounds, or change the native MOSS
+grid. A sufficiently populated tail, absent donor mass, or a curriculum range
+below the tail makes it a no-op. Redistribution happens after shifting and
+curriculum range mapping; it changes sampling frequency, not loss weights.
+
+Cabal Timestep Shift adapts the SDXL trainer's resolution curve. With zero offset,
+`shift` is its effective value at 1024px. The additional offset scales with
+effective image resolution / 1024. For anchor 6 and zero offset, 512/768/1024/2048px
+use shifts 2.75/4.25/6/15.5. Runtime uses each image's actual spatial dimensions,
+including rectangular images and individual images in packed batches. Cabal and
+Flux shift are mutually exclusive; nonpositive effective Cabal shifts are rejected.
+The Kohaku MOSS sampler keeps its existing shift locks and permits Normal low SNR.
+
+Both UIs expose these training options. Electron automatically changes the inline
+preview to colored isometric resolution curves for either dynamic shift mode,
+using configured dataset tiers or the active staged-resolution plan. PySide keeps
+its 2D preview and editable preview latent dimensions. Previews show the full
+distribution before curriculum mapping and never consume training RNG.
+
+New options default off, and mean defaults to zero; unchanged configurations retain
+their existing timestep draws and RNG consumption. Checkpoints and recovered TOMLs
+include the new settings through the existing training metadata.
+
 ### Random streams and DDP
 
 `train.seed` initializes separate timestep, noise and dual-timestep-mask streams

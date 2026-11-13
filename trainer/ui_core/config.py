@@ -10,13 +10,25 @@ from ..training.flow import FlowConfig
 from ..training.resolution_schedule import ResolutionSchedule
 from .schema import SPEC, LAYOUT
 from .rules import _RULES
-from .timestep import distribution, SAMPLER_KEYS
+from .timestep import distribution, resolution_distributions, SAMPLER_KEYS
 from .presets import TRAINTRAIN_CURRICULUM
 
 
 def normalize(flat, previous=None):
     value = copy.deepcopy(flat)
     if previous is not None:
+        if value.get("flow.cabal_shift") and not previous.get("flow.cabal_shift"):
+            value["flow.flux_shift"] = False
+            if value.get("flow.shift") is None:
+                value["flow.shift"] = 6.0
+        elif value.get("flow.flux_shift") and not previous.get("flow.flux_shift"):
+            value["flow.cabal_shift"] = False
+            value["flow.shift"] = None
+        if (
+            value.get("flow.timestep_sample_method") == "uniform"
+            and previous.get("flow.timestep_sample_method") != "uniform"
+        ):
+            value["flow.sigmoid_scale"] = 1.0
         if value.get("resolution_schedule.enabled") and not previous.get(
             "resolution_schedule.enabled"
         ):
@@ -70,7 +82,12 @@ def normalize(flat, previous=None):
     )
     if value.get("flow.timestep_sample_method") == "moss":
         value.update(
-            {"flow.sigmoid_scale": 1.0, "flow.shift": 1.0, "flow.flux_shift": False}
+            {
+                "flow.sigmoid_scale": 1.0,
+                "flow.shift": 1.0,
+                "flow.flux_shift": False,
+                "flow.cabal_shift": False,
+            }
         )
     if value.get("dataset.subsets"):
         value["dataset.path"] = None
@@ -130,6 +147,8 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         ok, error, notes, summary = False, str(exc), [], "Review configuration"
     preview = None
+    curves = []
+    preview_error = ""
     try:
         cfg = FlowConfig(
             **{
@@ -138,9 +157,11 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
                 if k.startswith("flow.") and k.removeprefix("flow.") in SAMPLER_KEYS
             }
         )
+        curves = resolution_distributions(cfg, flat)
         preview = asdict(distribution(cfg, latent_h, latent_w))
-    except (ValueError, TypeError, ZeroDivisionError, OverflowError):
-        pass
+    except (ValueError, TypeError, KeyError, ZeroDivisionError, OverflowError) as exc:
+        preview = None
+        preview_error = str(exc)
     stages = None
     if flat.get("resolution_schedule.enabled"):
         try:
@@ -188,6 +209,8 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
         enabled=enabled,
         experimental=bool(experiments),
         distribution=preview,
+        resolutionDistributions=curves,
+        timestepError=preview_error,
         stages=stages,
         windowsRepair=bool(windows_repair),
     )

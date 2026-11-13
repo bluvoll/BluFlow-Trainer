@@ -899,15 +899,31 @@ SPEC: dict[str, Spec] = {
         lambda: F.IntEditor(2, 100000),
     ),
     "flow.sigmoid_scale": _spec(
-        "Sigmoid scale",
-        "Widens or narrows the logit-normal draw. Measured p10/p90: 0.5 -> 0.34/0.65, "
+        "Standard deviation",
+        "Logit-normal standard deviation (sigma). TOML key: sigmoid_scale, retained for compatibility. "
+        "Widens or narrows the normal draw before sigmoid. Measured p10/p90: 0.5 -> 0.34/0.65, "
         "1.0 -> 0.21/0.78, 2.0 -> 0.07/0.93.\n\nHAS NO EFFECT under `uniform` -- setting both is a "
         "config error rather than a silent no-op.",
         lambda: F.FloatEditor(0.05, 10.0, 0.1, 2),
     ),
+    "flow.logit_mean": _spec(
+        "Mean",
+        "Logit-normal mean before sigmoid; default 0. More positive biases toward noise. "
+        "The SDXL trainer's lognorm_front values are mean=-0.2 and standard deviation=1.5.",
+        lambda: F.FloatEditor(-20, 20, 0.01, 3),
+    ),
+    "flow.normal_low_snr": _spec(
+        "Normal low SNR",
+        "Fill deficient probability bins in the final 5% of timesteps toward a uniform baseline, "
+        "moving mass from lower timesteps. Works with every distribution and respects curriculum ranges. "
+        "Does nothing if the tail needs no additional mass or no donor mass exists.",
+        lambda: F.BoolEditor("Normal low SNR"),
+        inline_label=True,
+    ),
     "flow.shift": _spec(
         "Shift",
-        "Static timestep shift; pushes t higher (more noise). Inference default is 3.0. Latents "
+        "Static timestep shift, or the 1024px anchor when Cabal Timestep Shift is enabled. "
+        "Pushes t higher (more noise). Inference default is 3.0. Latents "
         "here normalise to std ~0.69 rather than 1.0, so effective noise is already higher than a "
         "unit-variance schedule assumes -- shift < 3 is worth an A/B on illustration data.\n\n"
         "Leave EMPTY for no shift. Do not type 0: the map sends every timestep to exactly 0, so "
@@ -920,6 +936,19 @@ SPEC: dict[str, Spec] = {
         "Optional resolution-dependent shift. Mage-Flow pretraining uses the static shift instead; default is shift=6.",
         lambda: F.BoolEditor("Scale shift with resolution (flux_shift)"),
         inline_label=True,
+    ),
+    "flow.cabal_shift": _spec(
+        "Cabal Timestep Shift",
+        "Resolution-dependent Cabal curve, anchored by Shift at 1024px with zero offset. "
+        "Uses each image's actual dimensions. Mutually exclusive with Flux shift; disabled for the Kohaku MOSS sampler.",
+        lambda: F.BoolEditor("Cabal Timestep Shift"),
+        inline_label=True,
+    ),
+    "flow.cabal_shift_offset": _spec(
+        "Cabal shift offset",
+        "Additional shift offset scaled by effective image resolution / 1024. At 1024px the effective "
+        "shift is Shift + offset. Default 0; negative values must still produce a positive shift at every resolution.",
+        lambda: F.FloatEditor(-100, 100, 0.1, 3),
     ),
     "flow.phase_mapping": _spec(
         "Curriculum phase mapping",
@@ -1559,9 +1588,13 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                 "Flow Matching",
                 [
                     "flow.timestep_sample_method",
+                    "flow.logit_mean",
                     "flow.sigmoid_scale",
+                    "flow.normal_low_snr",
                     "flow.shift",
                     "flow.flux_shift",
+                    "flow.cabal_shift",
+                    "flow.cabal_shift_offset",
                     "flow.use_ot",
                     "flow.phase_mapping",
                     "flow.moss_mu",

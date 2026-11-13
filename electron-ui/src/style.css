@@ -661,17 +661,29 @@ tr:last-child > td {
   gap: 2px;
   border-bottom: 1px solid var(--ui-border);
 }
-.preview-grid {
+.distribution-isometric {
+  position: relative;
+}
+.distribution-isometric canvas {
+  display: block;
+  width: 100%;
+  height: 300px;
+}
+.distribution-legend {
   display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin: 5px 0 8px;
+  font-size: 10px;
+}
+.distribution-legend > span {
+  display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-bottom: 10px;
-  font-size: 10px;
-  color: var(--ui-muted);
 }
-.preview-grid input {
-  width: 55px !important;
-  min-width: 0;
+.distribution-legend i {
+  width: 9px;
+  height: 2px;
 }
 .distribution-bars > div {
   background: var(--ui-accent);

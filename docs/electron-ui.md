@@ -70,6 +70,7 @@ system's generic configuration directory. Electron presentation state is separat
 | Configuration | All current GUI fields, labels, tooltips, custom tables, defaults, locks, advisories, and edit transitions share Python definitions. TOML-only values survive round trips. |
 | Saving | Managed filenames follow the run name; external configs are copied; renamed runs preserve previous files; collisions ask before replacing another config. Autosave saves at Start, not on every edit. |
 | Dataset preparation | Audit, latent cache, dry-run, subsets, resolution tiers, staged-resolution preview, and timestep distribution preview. |
+| Timestep sampling | Editable logit-normal mean/std, Normal low SNR for all distributions, Cabal shift anchored at 1024px, and automatic inline 3D resolution curves for Cabal or Flux shift. |
 | Training | GPU selection, Windows attention repair, allocator choice, INT8 calibration, toolchain preflight, cache-before-training, process-tree Stop, and close-while-running confirmation. |
 | Queue | Independent TOML snapshots, duplicate-output protection, live pending-entry changes, retries, continue-after-error, and cancellation of dependent steps. Session-local queue contents are not restored after exit. |
 | Metrics | Loss, EMA, MSE/HF, LR, step time, per-rank peak memory, elapsed time, stage details, Pause and Clear. Wheel to zoom, drag to pan, hover for values, and reset the view. Long runs retain the full timeline with local extrema. Successful queued runs export `metrics-final.png` even when Metrics is hidden. |

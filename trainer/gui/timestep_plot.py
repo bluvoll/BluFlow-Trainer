@@ -9,11 +9,7 @@ from ..training.moss_timesteps import probability_table
 from .widgets import THEME
 
 
-SAMPLER_KEYS = ("timestep_sample_method", "sigmoid_scale", "shift", "flux_shift",
-                "moss_mu", "moss_std", "moss_cutoff", "moss_uniform_mix", "moss_p_full", "moss_steps")
-
-
-from ..ui_core.timestep import Distribution, distribution
+from ..ui_core.timestep import Distribution, distribution, SAMPLER_KEYS
 
 
 class _Canvas(QtWidgets.QWidget):
@@ -114,13 +110,13 @@ class TimestepDistributionWidget(QtWidgets.QWidget):
         if signature == self._last:
             return
         self._last = signature
-        self.grid_controls.setVisible(bool(options.get("flux_shift")))
+        self.grid_controls.setVisible(bool(options.get("flux_shift") or options.get("cabal_shift")))
         try:
             result = distribution(FlowConfig(**options), h, w)
             self.canvas.result = result
             self.canvas.error = ""
             self.summary.setText(f"Median t: {result.median:.3f}   •   "
-                                 f"High noise (t ≥ 0.9): {result.high_noise:.1%}")
+                                 f"High noise (t ≥ 0.9): {result.high_noise:.1%}   •   Shift: {result.shift:.3g}")
         except (ValueError, TypeError, OverflowError) as exc:
             self.canvas.result = None
             self.canvas.error = str(exc)

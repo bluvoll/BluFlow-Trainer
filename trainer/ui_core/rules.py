@@ -60,7 +60,13 @@ _RULES = {
         c.get("flow.timestep_sample_method") == "logit_normal"
     ),
     "flow.shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
+    "flow.logit_mean": lambda c: c.get("flow.timestep_sample_method") == "logit_normal",
     "flow.flux_shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
+    "flow.cabal_shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
+    "flow.cabal_shift_offset": lambda c: (
+        bool(c.get("flow.cabal_shift"))
+        and c.get("flow.timestep_sample_method") != "moss"
+    ),
     **{
         f"flow.moss_{option}": (
             lambda c: c.get("flow.timestep_sample_method") == "moss"

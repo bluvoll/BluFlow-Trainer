@@ -59,7 +59,7 @@ jobs:
       - run: python -m trainer.electron_backend --check
       - name: Backend and existing GUI contracts
         shell: bash
-        run: python -m pytest tests/test_electron*.py tests/test_gui*.py tests/test_lora_utilities.py tests/test_moss_export.py tests/test_recover_config.py -q
+        run: python -m pytest tests/test_electron*.py tests/test_gui*.py tests/test_timestep*.py tests/test_moss_timestep_distribution.py tests/test_lora_utilities.py tests/test_moss_export.py tests/test_recover_config.py -q
       - run: npm --prefix electron-ui run build
       - run: npm --prefix electron-ui test
       - name: Electron workflows (Windows)
