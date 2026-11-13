@@ -445,6 +445,7 @@ h2 {
 .settings-panel {
   height: 100%;
   overflow: auto;
+  scrollbar-gutter: stable;
   padding: 18px 18px 30px;
 }
 .content-heading {
@@ -463,15 +464,18 @@ h2 {
   min-height: 25px;
 }
 .settings-groups {
-  columns: 330px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr));
+  grid-auto-rows: 4px;
   column-gap: 14px;
+  align-items: start;
 }
 .settings-group {
-  break-inside: avoid;
   display: block;
+  min-width: 0;
   border: 1px solid var(--ui-border);
   border-radius: 4px;
-  margin: 0 0 14px;
+  margin: 0;
   overflow: hidden;
 }
 .group-heading {
@@ -1215,9 +1219,6 @@ tr:last-child > td {
   }
   .settings-panel {
     padding: 14px 12px;
-  }
-  .settings-groups {
-    columns: 1;
   }
   .field-row {
     grid-template-columns: minmax(110px, 1fr) minmax(120px, 1fr);

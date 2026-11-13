@@ -48,6 +48,8 @@ and `python -m trainer.gui` remain available.
   all visible categories.
 - Settings and Live Metrics share the center. Run controls remain on the right;
   Console and Run Queue start below the center.
+- Settings use all fitting columns as the panel grows and repack sections when
+  resized or collapsed, preserving editor focus.
 - Drag panel tabs to rearrange or group them. The Panels menu restores, floats,
   or hides individual panels, and resets the workspace. Layout and window size
   are remembered for Electron.

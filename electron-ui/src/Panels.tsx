@@ -3,6 +3,7 @@ import { useActions } from './actions';
 import { chooseCategory, command, edit, error, subscribeEvents, useStore } from './store';
 import FieldRow from './Fields';
 import MetricsPanel from './Metrics';
+import SettingsGrid from './SettingsGrid';
 
 export function Navigation() {
   const { data, state, category } = useStore((value) => ({
@@ -129,7 +130,7 @@ export function Settings() {
           <button onClick={() => all(true)}>Collapse all</button>
         </div>
       </div>
-      <div className="settings-groups">
+      <SettingsGrid>
         {matching.map((group) => (
           <section className="settings-group" key={group.title}>
             <button
@@ -178,7 +179,7 @@ export function Settings() {
             )}
           </section>
         ))}
-      </div>
+      </SettingsGrid>
       {!matching.length && <div className="empty-panel">No matching settings.</div>}
     </div>
   );

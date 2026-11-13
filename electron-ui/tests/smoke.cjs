@@ -150,6 +150,64 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
       renderedFields.add(key);
   }
   assert.equal(renderedFields.size, fields, 'Every Python field has a rendered editor');
+  // Uneven sections must fill the available width, including when one is collapsed.
+  await page.getByRole('button', { name: /^Method.*sections/ }).click();
+  await page.getByRole('button', { name: 'Expand all', exact: true }).click();
+  await page.setViewportSize({ width: 3840, height: 1500 });
+  await page.waitForFunction(() => {
+    const cards = [...document.querySelectorAll('.settings-group')];
+    return (
+      cards.length === 6 &&
+      new Set(cards.map((card) => Math.round(card.getBoundingClientRect().x))).size === 6
+    );
+  });
+  await page.getByRole('button', { name: 'Full Finetuning', exact: true }).click();
+  const packed = async () => {
+    await page.waitForFunction(() => {
+      const grid = document.querySelector('.settings-groups');
+      const cards = [...grid.children].map((card) => card.getBoundingClientRect());
+      const overlaps = cards.some((a, i) =>
+        cards
+          .slice(i + 1)
+          .some(
+            (b) =>
+              Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 &&
+              Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1,
+          ),
+      );
+      return (
+        !overlaps &&
+        Math.abs(
+          Math.max(...cards.map((card) => card.right)) - grid.getBoundingClientRect().right,
+        ) < 2
+      );
+    });
+  };
+  await packed();
+  await page.screenshot({ path: path.join(artifacts, 'settings-wide.png') });
+  const rankInput = page.locator('[data-field="adapter.rank"] input');
+  await rankInput.focus();
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.waitForFunction(() => {
+    const columns = new Set(
+      [...document.querySelectorAll('.settings-group')].map((card) =>
+        Math.round(card.getBoundingClientRect().x),
+      ),
+    ).size;
+    return columns >= 2 && columns < 6;
+  });
+  await packed();
+  assert.ok(
+    await rankInput.evaluate((input) => input === document.activeElement),
+    'Resizing preserves editor focus',
+  );
+  const columns = await page
+    .locator('.settings-group')
+    .evaluateAll(
+      (cards) => new Set(cards.map((card) => Math.round(card.getBoundingClientRect().x))).size,
+    );
+  assert.ok(columns >= 2 && columns < 6, 'Sections reflow into fewer columns in a narrower panel');
+  await page.screenshot({ path: path.join(artifacts, 'settings-reflow.png') });
   await page.getByText('Utilities', { exact: true }).click();
   await page.getByRole('button', { name: 'Resize LoRA rank (SVD)', exact: true }).click();
   await page.getByRole('dialog', { name: 'Resize LoRA rank', exact: true }).waitFor();
