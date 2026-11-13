@@ -18,7 +18,6 @@ const { BackendPipe } = require('./pipe.cjs');
 const root = path.resolve(__dirname, '../..'),
   dist = path.resolve(__dirname, '../dist');
 const test = process.argv.includes('--test');
-const headless = test && !process.argv.includes('--test-visible');
 const args = process.argv.slice(2);
 let window,
   child,
@@ -33,7 +32,7 @@ app.setName('BluFlow-Trainer Electron');
 if (test) {
   if (!process.env.BLUFLOW_TEST_PROFILE) throw Error('Tests require BLUFLOW_TEST_PROFILE');
   app.setPath('userData', path.resolve(process.env.BLUFLOW_TEST_PROFILE));
-  if (headless) app.disableHardwareAcceleration();
+  app.disableHardwareAcceleration();
 } else app.setPath('userData', path.join(app.getPath('appData'), 'BluFlow-Trainer-Electron'));
 protocol.registerSchemesAsPrivileged([
   { scheme: 'bluflow-app', privileges: { standard: true, secure: true, supportFetchAPI: true } },
@@ -147,7 +146,7 @@ ipcMain.on('bluflow:ready', (event) => {
     capture.ready();
     return;
   }
-  if (event.sender === window?.webContents && !headless) window.show();
+  if (event.sender === window?.webContents && !test) window.show();
 });
 function presentationPath() {
   return path.join(app.getPath('userData'), 'workspace.json');
@@ -307,7 +306,7 @@ app
         sandbox: true,
         nodeIntegration: false,
         backgroundThrottling: false,
-        offscreen: headless,
+        offscreen: test,
       },
     });
     configure(window);

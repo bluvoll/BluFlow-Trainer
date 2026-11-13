@@ -361,12 +361,6 @@ export default function App() {
     >
       <div className="app" data-testid="app">
         <header className="app-toolbar">
-          <div className="brand">
-            <div className="brand-emblem">B</div>
-            <div>
-              BluFlow<small>TRAINER</small>
-            </div>
-          </div>
           <div className="config-actions">
             <select
               aria-label="Configuration preset"

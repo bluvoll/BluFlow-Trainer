@@ -1,4 +1,4 @@
-// Exercise the real launch supervisor and a native window, beyond the offscreen UI smoke.
+// Exercise the real launch supervisor while keeping every UI test offscreen.
 const assert = require('node:assert/strict');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -18,7 +18,6 @@ async function verifyStartup() {
       path.join(root, 'scripts/electron.cjs'),
       'start',
       '--test',
-      '--test-visible',
       '--no-update-check',
       '--no-dependency-check',
       '--inspect=0',
@@ -115,16 +114,17 @@ async function verifyStartup() {
     let latest;
     await until(async () => {
       latest = await evaluate(loaded);
-      return latest?.visible;
-    }, 'a visible training workspace');
-    assert.equal(latest.offscreen, false, 'Verify a native window, not an offscreen renderer');
+      return latest;
+    }, 'the hidden training workspace');
+    assert.equal(latest.visible, false, 'UI tests must never show a window');
+    assert.equal(latest.offscreen, true, 'UI tests must use offscreen Electron');
     await evaluate(`(async()=>{
       const win=process.mainModule.require('electron').BrowserWindow.getAllWindows()[0];
       const png=(await win.webContents.capturePage()).toPNG();
-      process.mainModule.require('node:fs').writeFileSync(${JSON.stringify(path.join(artifacts, 'visible-workspace.png'))},png);
+      process.mainModule.require('node:fs').writeFileSync(${JSON.stringify(path.join(artifacts, 'workspace.png'))},png);
     })()`);
     console.log(
-      'Native startup passed: the real launch script opens a visible training workspace.',
+      'Hidden startup passed: the real launch script loads the workspace in offscreen Electron.',
     );
   } finally {
     if (socket?.readyState === WebSocket.OPEN) {

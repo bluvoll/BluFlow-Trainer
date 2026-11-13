@@ -14,11 +14,6 @@ export function Navigation() {
   if (!data || !state) return null;
   return (
     <div className="navigation-panel">
-      <div className="panel-intro">
-        <span className="eyebrow">CONFIGURATION</span>
-        <h2>Training recipe</h2>
-        <span className="muted">{Object.keys(data.fields).length} settings · one workspace</span>
-      </div>
       <input
         className="search-input"
         type="search"
@@ -68,11 +63,6 @@ export function Navigation() {
               </span>
             </button>
           ))}
-      </div>
-      <div className="navigation-note">
-        <b>Portable configurations</b>
-        <p>Your training settings use the same TOML format as the original trainer.</p>
-        <span className="path-text">{state.configDir}</span>
       </div>
     </div>
   );
@@ -264,11 +254,6 @@ export function RunControls() {
     blocked = !v.valid || v.advisories.some(([level]) => level === 'error');
   return (
     <div className="run-panel">
-      <div className="panel-intro">
-        <span className="eyebrow">RUN CONTROL</span>
-        <h2>{state.busy ? 'Job in progress' : 'Ready when you are'}</h2>
-        <span className="muted">{state.active?.label || 'Validate, prepare, train.'}</span>
-      </div>
       <section className="run-section">
         <div className="section-caption">COMPUTE</div>
         <div className="gpu-list">

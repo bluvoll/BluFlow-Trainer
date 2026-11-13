@@ -70,7 +70,7 @@ system's generic configuration directory. Electron presentation state is separat
 | Dataset preparation | Audit, latent cache, dry-run, subsets, resolution tiers, staged-resolution preview, and timestep distribution preview. |
 | Training | GPU selection, Windows attention repair, allocator choice, INT8 calibration, toolchain preflight, cache-before-training, process-tree Stop, and close-while-running confirmation. |
 | Queue | Independent TOML snapshots, duplicate-output protection, live pending-entry changes, retries, continue-after-error, and cancellation of dependent steps. Session-local queue contents are not restored after exit. |
-| Metrics | Loss, EMA, MSE/HF, LR, step time, per-rank peak memory, elapsed time, stage details, run summaries, Pause and Clear. Wheel to zoom, drag to pan, hover for values, and reset the view. Long runs retain the full timeline with local extrema. Successful queued runs export `metrics-final.png` even when Metrics is hidden. |
+| Metrics | Loss, EMA, MSE/HF, LR, step time, per-rank peak memory, elapsed time, stage details, Pause and Clear. Wheel to zoom, drag to pan, hover for values, and reset the view. Long runs retain the full timeline with local extrema. Successful queued runs export `metrics-final.png` even when Metrics is hidden. |
 | Console | Live output, replaceable progress lines, follow mode, paged access to complete compressed history, copy the full log, and Clear. |
 | Utilities | Native Electron dialogs for alpha/strength editing, fused/separated MOSS QKV, fixed-rank/sv_fro resizing, and TOML recovery. Operations run in independent Python workers. |
 | Startup | Current-branch update check, dependency refresh, supervised rebuild/restart, and readable backend-failure reporting. |
@@ -94,8 +94,8 @@ venv\Scripts\python.exe -m pytest tests/test_electron_backend.py tests/test_elec
 ```
 
 On Linux use `venv/bin/python`; run the UI smoke test under `xvfb-run -a` when
-there is no display. The smoke harness checks that the real launcher opens a
-visible native window, then exercises a hidden Electron window with isolated
+there is no display. All UI tests must use hidden, offscreen Electron windows.
+The smoke harness exercises the real launcher and desktop workflows with isolated
 preferences/configs and small synthetic data. Captures and test profiles go to
 `.artifacts/electron-startup/` and `.artifacts/electron-smoke/`, which are ignored
 by Git. It never starts GPU training.

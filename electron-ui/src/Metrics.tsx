@@ -43,11 +43,11 @@ export function MetricsView({
       <div className="metrics-top">
         <div>
           <span className="eyebrow">{snapshot ? 'FINAL TRAINING METRICS' : 'LIVE METRICS'}</span>
-          <h2>
-            {latest.step !== undefined
-              ? `Step ${latest.step} / ${latest.total}`
-              : 'Ready for a training run'}
-          </h2>
+          {latest.step !== undefined && (
+            <h2>
+              Step {latest.step} / {latest.total}
+            </h2>
+          )}
           <div className="metrics-facts">
             <span>
               Elapsed <b data-testid="elapsed">{elapsedText(elapsed)}</b>
@@ -161,13 +161,6 @@ export function MetricsView({
         <Chart title="Step time · s/it" records={metrics.records} series={SPEED} />
         <Chart title="Peak allocated VRAM · GiB" records={metrics.records} series={memory} />
       </div>
-      <section className="run-summary">
-        <strong>Run summary</strong>
-        <pre>
-          {metrics.reports.join('\n') ||
-            'Loading, caching and compilation details appear here when a run starts.'}
-        </pre>
-      </section>
     </div>
   );
 }
