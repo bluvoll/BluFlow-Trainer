@@ -8,6 +8,7 @@ export const editorKinds = [
   'PathEditor',
   'IntEditor',
   'OptIntEditor',
+  'ImageTargetEditor',
   'FloatEditor',
   'SciEditor',
   'BoolEditor',
@@ -148,6 +149,47 @@ export function CloseIcon() {
 }
 
 const tableDrafts = new Map<string, Flat[]>();
+function TargetInput({
+  value,
+  onChange,
+  label = 'Image weighting',
+}: {
+  value: any;
+  onChange: (value: any) => void;
+  label?: string;
+}) {
+  const retained = useRef(1);
+  if (typeof value === 'number') retained.current = value;
+  return (
+    <div className="image-weighting">
+      <label className="check">
+        <span className="weight-switch">
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label={`${label}: use target images`}
+            checked={value != null}
+            onChange={(e) => onChange(e.target.checked ? retained.current : null)}
+          />
+          <span className="switch-track" aria-hidden="true" />
+        </span>
+        {value == null ? 'Repeats' : 'Target images'}
+      </label>
+      {value != null && (
+        <ValueInput
+          aria-label={`${label}: target image count`}
+          type="number"
+          min="0"
+          step="1"
+          value={value}
+          parse={(text) => numeric(text, true) ?? ''}
+          onChange={onChange}
+        />
+      )}
+    </div>
+  );
+}
+
 function TableEditor({
   field,
   value,
@@ -171,7 +213,7 @@ function TableEditor({
   };
   const columns =
     kind === 'SubsetEditor'
-      ? ['Folder', 'Repeats', 'Texture crops']
+      ? ['Folder', 'Image weighting', 'Texture crops']
       : curriculum
         ? ['Start %', 't min', 't max', 'Mode', 'LR ×']
         : kind === 'BlockLRRangesEditor'
@@ -212,13 +254,23 @@ function TableEditor({
         );
       if (column === 1)
         return (
-          <input
-            aria-label={`Subset ${index + 1} repeats`}
-            type="number"
-            min="1"
-            value={row.num_repeats}
-            onChange={(e) => set('num_repeats', numeric(e.target.value, true))}
-          />
+          <div>
+            <TargetInput
+              value={row.target_images}
+              label={`Subset ${index + 1}`}
+              onChange={(v) => set('target_images', v)}
+            />
+            {row.target_images == null && (
+              <input
+                aria-label={`Subset ${index + 1} repeats`}
+                type="number"
+                min="0"
+                step="any"
+                value={row.num_repeats ?? 1}
+                onChange={(e) => set('num_repeats', numeric(e.target.value))}
+              />
+            )}
+          </div>
         );
       return (
         <input
@@ -382,7 +434,9 @@ function TableEditor({
         <div className="stage-preview">
           {state.validation.stages.map((stage, i) => (
             <div key={i}>
-              {stage.resolution}px · {stage.steps} updates · effective batch {stage.effective_batch}
+              {stage.resolution}px · {stage.epochs ?? stage.steps}{' '}
+              {stage.unit === 'epochs' ? 'epochs' : 'updates'} · effective batch{' '}
+              {stage.effective_batch}
             </div>
           ))}
         </div>
@@ -397,6 +451,7 @@ function Editor({ field, value }: { field: Field; value: any }) {
     a = field.args,
     k = field.kwargs;
   const label = field.label;
+  if (field.kind === 'ImageTargetEditor') return <TargetInput value={value} onChange={set} />;
   if (
     ['CurriculumEditor', 'SubsetEditor', 'BlockLRRangesEditor', 'ResolutionStagesEditor'].includes(
       field.kind,
@@ -632,8 +687,17 @@ export default function FieldRow({ field }: { field: Field }) {
   ].includes(field.kind);
   if (
     state.flat['resolution_schedule.enabled'] &&
+    state.flat['resolution_schedule.unit'] !== 'epochs' &&
     ['train.epochs', 'train.save_every_epochs'].includes(field.key)
   )
+    return null;
+  if (
+    state.flat['resolution_schedule.enabled'] &&
+    state.flat['resolution_schedule.unit'] === 'epochs' &&
+    field.key === 'train.max_steps'
+  )
+    return null;
+  if (field.key === 'dataset.num_repeats' && state.flat['dataset.target_images'] != null)
     return null;
   return (
     <fieldset

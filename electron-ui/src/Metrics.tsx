@@ -109,6 +109,8 @@ export function MetricsView({
                 {latest.resolution_stage.resolution}px
                 {' · '}
                 {latest.resolution_stage.completed}/{latest.resolution_stage.total} updates
+                {latest.resolution_stage.unit === 'epochs' &&
+                  ` · stage epoch ${latest.resolution_stage.stage_epoch}/${latest.resolution_stage.epochs} · run epoch ${latest.resolution_stage.epoch}`}
                 {' · '}
                 {latest.resolution_stage.images} images
                 {' · '}effective batch {latest.resolution_stage.effective_batch}

@@ -97,8 +97,12 @@ _RULES = {
             and c.get("quant.use_quantized_matmul") is True
         )
     ),
-    "train.epochs": lambda c: not c.get("resolution_schedule.enabled"),
-    "train.save_every_epochs": lambda c: not c.get("resolution_schedule.enabled"),
+    "train.epochs": lambda c: not c.get("resolution_schedule.enabled") or c.get('resolution_schedule.unit') == 'epochs',
+    "train.save_every_epochs": lambda c: not c.get("resolution_schedule.enabled") or c.get('resolution_schedule.unit') == 'epochs',
+    "train.max_steps": lambda c: not c.get("resolution_schedule.enabled") or c.get('resolution_schedule.unit') != 'epochs',
+    "resolution_schedule.unit": lambda c: bool(c.get('resolution_schedule.enabled')),
+    "dataset.num_repeats": lambda c: c.get('dataset.target_images') is None and not c.get('dataset.subsets'),
+    "dataset.target_images": lambda c: not c.get('dataset.subsets'),
     "dataset.tier_collapse": lambda c: (
         bool(c.get("dataset.resolutions")) and not c.get("resolution_schedule.enabled")
     ),

@@ -80,3 +80,56 @@ def test_gui_enabling_stages_hides_epochs_and_seeds_valid_plan(gui):
     gui.editors['resolution_schedule.enabled'].set(False)
     gui._on_edit()
     assert not any(w.isHidden() for w in gui.rows['train.epochs'])
+
+
+def test_epoch_duration_and_weight_switch_round_trip(gui, tmp_path):
+    from trainer.training.config import load_config
+    gui._apply(bridge.defaults() | {
+        'dataset.path': '/images', 'dataset.source': 'latents', 'train.model_family': 'moss_image',
+        'adapter.kind': 'lora', 'train.batch_size': 2,
+    })
+    gui.editors['resolution_schedule.enabled'].set(True)
+    gui._on_edit()
+    gui.editors['resolution_schedule.unit'].set('epochs')
+    gui.editors['train.epochs'].set(50)
+    gui.editors['train.save_every_epochs'].set(2)
+    gui.editors['dataset.num_repeats'].set(1.56)
+    gui._on_edit()
+    assert not any(w.isHidden() for w in gui.rows['train.epochs'])
+    assert all(w.isHidden() for w in gui.rows['train.max_steps'])
+    stages = gui.editors['resolution_schedule.stages']
+    assert [stages.table.item(r, 4).text() for r in range(3)] == ['10', '10', '30']
+    target = gui.editors['dataset.target_images']
+    target.toggle.setChecked(True)
+    target.count.setValue(156)
+    gui._on_edit()
+    assert gui.collect()['dataset.target_images'] == 156
+    assert all(w.isHidden() for w in gui.rows['dataset.num_repeats'])
+    path = tmp_path / 'epoch-target.toml'
+    bridge.write_toml(path, gui.collect())
+    assert 'num_repeats' not in path.read_text()
+    assert 'max_steps' not in path.read_text()
+    cfg = load_config(path)
+    assert cfg.dataset.target_images == 156
+    assert cfg.train.epochs == 50 and cfg.train.save_every_epochs == 2
+    target.toggle.setChecked(False)
+    gui._on_edit()
+    assert gui.collect()['dataset.num_repeats'] == 1.56
+
+
+def test_subset_weight_switch_round_trip():
+    from trainer.gui.fields import SubsetEditor
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    editor = SubsetEditor()
+    rows = [dict(path='/a', num_repeats=1.56), dict(path='/b', target_images=25, texture=False)]
+    editor.set(rows)
+    assert editor.get() == rows
+    target = editor.table.cellWidget(0, 3).editor
+    target.toggle.setChecked(True)
+    target.count.setValue(75)
+    assert editor.get()[0] == dict(path='/a', target_images=75)
+    assert not editor.table.cellWidget(0, 1).isEnabled()
+    target.toggle.setChecked(False)
+    assert editor.get()[0] == rows[0]
+    editor.widget.deleteLater()
+    app.processEvents()

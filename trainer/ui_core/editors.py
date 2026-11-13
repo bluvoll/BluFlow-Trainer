@@ -28,6 +28,7 @@ KINDS = (
     "PathEditor",
     "IntEditor",
     "OptIntEditor",
+    "ImageTargetEditor",
     "FloatEditor",
     "SciEditor",
     "BoolEditor",

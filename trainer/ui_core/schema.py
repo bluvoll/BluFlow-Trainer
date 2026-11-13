@@ -277,7 +277,7 @@ SPEC: dict[str, Spec] = {
     ),
     "resolution_schedule.enabled": _spec(
         "Staged resolutions",
-        "MOSS PEFT LoRA / LyCORIS LoCon with cached latents only. Train each tier for a fixed share of successful updates; no epochs.",
+        "MOSS PEFT LoRA / LyCORIS LoCon with cached latents only. Allocate successful updates or whole dataset epochs between tiers.",
         lambda: F.BoolEditor("Enable staged resolutions"),
         inline_label=True,
     ),
@@ -286,6 +286,10 @@ SPEC: dict[str, Spec] = {
         "Write step checkpoints after each completed stage; final stage uses the normal final save.",
         lambda: F.BoolEditor("Save stage checkpoints"),
         inline_label=True,
+    ),
+    "resolution_schedule.unit": _spec(
+        "Stage duration", "Split total steps or whole epochs using the stage shares.",
+        lambda: F.ChoiceEditor(["Steps", "Epochs"], ["steps", "epochs"]),
     ),
     "resolution_schedule.stages": _spec(
         "Resolution stages",
@@ -673,8 +677,12 @@ SPEC: dict[str, Spec] = {
     ),
     "dataset.num_repeats": _spec(
         "Repeats",
-        "Multiplies every entry. Stacks on top of the tier cross product.",
-        lambda: F.IntEditor(1, 100),
+        "Source-image multiplier, including fractions such as 1.56. Fractional extras rotate reproducibly each epoch, before resolution tiers are expanded.",
+        lambda: F.FloatEditor(0, 1_000_000, decimals=6),
+    ),
+    "dataset.target_images": _spec(
+        "Image weighting", "Switch between fractional repeats and an exact source-image count per epoch and resolution. Zero disables a source.",
+        lambda: F.ImageTargetEditor(),
     ),
     # ------------------------------------------------------------------ texture crops
     "curriculum": _spec(
@@ -1334,6 +1342,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                     "dataset.path",
                     "dataset.source",
                     "dataset.cache_validation",
+                    "dataset.target_images",
                     "dataset.num_repeats",
                     "dataset.subsets",
                 ],
@@ -1430,6 +1439,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                 "Staged Resolutions",
                 [
                     "resolution_schedule.enabled",
+                    "resolution_schedule.unit",
                     "resolution_schedule.stages",
                     "resolution_schedule.save_stage_end",
                 ],

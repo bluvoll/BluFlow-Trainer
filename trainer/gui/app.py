@@ -837,12 +837,17 @@ class TrainingGUI(QtWidgets.QWidget):
     def _refresh(self):
         flat = self.collect()
         staged = bool(flat.get('resolution_schedule.enabled'))
+        epoch_mode = flat.get('resolution_schedule.unit') == 'epochs'
         for key in ('train.epochs', 'train.save_every_epochs'):
             for widget in self.rows.get(key, ()):
-                widget.setVisible(not staged)
+                widget.setVisible(not staged or epoch_mode)
+        for widget in self.rows.get('train.max_steps', ()):
+            widget.setVisible(not staged or not epoch_mode)
+        for widget in self.rows.get('dataset.num_repeats', ()):
+            widget.setVisible(flat.get('dataset.target_images') is None)
         self.editors['resolution_schedule.stages'].preview(
-            flat.get('train.max_steps'), flat.get('train.batch_size'), self.num_processes(),
-            flat.get('train.gradient_accumulation_steps', 1))
+            flat.get('train.epochs' if epoch_mode else 'train.max_steps'), flat.get('train.batch_size'), self.num_processes(),
+            flat.get('train.gradient_accumulation_steps', 1), flat.get('resolution_schedule.unit', 'steps'))
         windows = sys.platform == "win32"
         attention = self.editors["train.attention_backend"]
         item = attention.widget.model().item(attention.values.index("torch_varlen"))
@@ -855,7 +860,7 @@ class TrainingGUI(QtWidgets.QWidget):
                 flat.get("train.pack_resolutions") and flat.get("train.attention_backend") != "flash_attn_2")))
         self.timestep_plot.set_config(flat)
         has_subsets = self.editors["dataset.subsets"].table.rowCount() > 0
-        for key in ("dataset.path", "dataset.num_repeats"):
+        for key in ("dataset.path", "dataset.num_repeats", 'dataset.target_images'):
             self.editors[key].set_enabled(not has_subsets)
             for widget in self.rows[key]:
                 widget.setEnabled(not has_subsets)
@@ -877,6 +882,8 @@ class TrainingGUI(QtWidgets.QWidget):
                 continue
             try:
                 on = bool(rule(flat)) and key not in locked_quant
+                if key in ('dataset.num_repeats', 'dataset.target_images') and has_subsets:
+                    on = False
             except Exception:
                 on = True
             editor.set_enabled(on)

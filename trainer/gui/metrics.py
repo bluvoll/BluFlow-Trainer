@@ -186,6 +186,9 @@ class LiveMetricsWidget(QtWidgets.QWidget):
             cell("elapsed", self.elapsed_text()),
             *([cell("tier", f"{L['resolution_stage']['resolution']}px"),
                cell("stage updates", f"{L['resolution_stage']['completed']}/{L['resolution_stage']['total']}"),
+               *([cell('stage epoch', f"{L['resolution_stage']['stage_epoch']}/{L['resolution_stage']['epochs']}"),
+                  cell('run epoch', L['resolution_stage']['epoch'])]
+                 if L['resolution_stage'].get('unit') == 'epochs' else []),
                cell("images seen", L['resolution_stage']['images']),
                cell("effective batch", L['resolution_stage']['effective_batch'])]
               if 'resolution_stage' in L else []),

@@ -139,7 +139,7 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
         except (ValueError, TypeError):
             enabled[key] = True
     if flat.get("dataset.subsets"):
-        enabled["dataset.path"] = enabled["dataset.num_repeats"] = False
+        enabled["dataset.path"] = enabled["dataset.num_repeats"] = enabled['dataset.target_images'] = False
     try:
         ok, error = bridge.validate(flat)
         notes = bridge.advisories(flat, processes)
@@ -165,13 +165,16 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
     stages = None
     if flat.get("resolution_schedule.enabled"):
         try:
+            unit = flat.get('resolution_schedule.unit', 'steps')
             budgets = ResolutionSchedule(
-                enabled=True, stages=flat["resolution_schedule.stages"]
-            ).budgets(flat.get("train.max_steps"))
+                enabled=True, stages=flat["resolution_schedule.stages"], unit=unit
+            ).budgets(flat.get('train.epochs' if unit == 'epochs' else 'train.max_steps'))
             stages = [
                 dict(
                     **stage,
-                    steps=budget,
+                    steps=budget if unit == 'steps' else None,
+                    epochs=budget if unit == 'epochs' else None,
+                    unit=unit,
                     effective_batch=(
                         flat["train.batch_size"][stage["resolution"]]
                         * processes

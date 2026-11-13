@@ -80,7 +80,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   const fields = await page.evaluate(
     async () => Object.keys((await window.bluflow.request('bootstrap')).fields).length,
   );
-  assert.equal(fields, 201);
+  assert.equal(fields, 203);
   const qkvSelect = page.locator('[data-field="train.moss_qkv_format"] select');
   assert.equal(
     await qkvSelect.inputValue(),
@@ -117,6 +117,27 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   );
   await page.getByRole('button', { name: /Dataset.*sections/ }).click();
   await page.locator('[data-field="dataset.subsets"]').waitFor();
+  const targetSwitch = page.getByRole('switch', {
+    name: 'Image weighting: use target images',
+    exact: true,
+  });
+  await page.locator('[data-field="dataset.num_repeats"] input').fill('1.56');
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat['dataset.num_repeats'] === 1.56,
+  );
+  await targetSwitch.check();
+  await page.getByLabel('Image weighting: target image count', { exact: true }).fill('156');
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat['dataset.target_images'] === 156,
+  );
+  assert.equal(await page.locator('[data-field="dataset.num_repeats"]').count(), 0);
+  await page.screenshot({ path: path.join(artifacts, 'image-target.png') });
+  await targetSwitch.uncheck();
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat['dataset.target_images'] == null,
+  );
+  assert.equal(await page.locator('[data-field="dataset.num_repeats"] input').inputValue(), '1.56');
+  await page.screenshot({ path: path.join(artifacts, 'fractional-repeats.png') });
   await page.getByRole('button', { name: 'Add subset', exact: true }).click();
   await page.getByLabel('Subset 1 folder', { exact: true }).fill('日本語/dataset');
   await page.waitForFunction(
@@ -124,8 +145,57 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
       (await window.bluflow.request('state')).flat['dataset.subsets']?.[0]?.path ===
       '日本語/dataset',
   );
+  await page.getByLabel('Subset 1 repeats', { exact: true }).fill('1.56');
+  await page.waitForFunction(
+    async () =>
+      (await window.bluflow.request('state')).flat['dataset.subsets']?.[0]?.num_repeats === 1.56,
+  );
+  await page.getByRole('switch', { name: 'Subset 1: use target images', exact: true }).check();
+  await page.getByLabel('Subset 1: target image count', { exact: true }).fill('75');
+  await page.waitForFunction(
+    async () =>
+      (await window.bluflow.request('state')).flat['dataset.subsets']?.[0]?.target_images === 75,
+  );
+  await page.getByRole('switch', { name: 'Subset 1: use target images', exact: true }).uncheck();
+  await page.waitForFunction(
+    async () =>
+      (await window.bluflow.request('state')).flat['dataset.subsets']?.[0]?.target_images == null,
+  );
+  assert.equal(await page.getByLabel('Subset 1 repeats', { exact: true }).inputValue(), '1.56');
   await page.waitForFunction(
     () => document.querySelector('[data-field="dataset.path"]')?.disabled === true,
+  );
+  await page.locator('[data-field="dataset.source"] select').selectOption({ label: 'latents' });
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat['dataset.source'] === 'latents',
+  );
+  await page.getByRole('button', { name: /^Training.*sections/ }).click();
+  await page.getByRole('button', { name: 'Expand all', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Staged resolutions', exact: true }).check();
+  await page.getByLabel('Stage duration', { exact: true }).selectOption({ label: 'Epochs' });
+  await page.getByLabel('Epochs', { exact: true }).fill('50');
+  await page.getByLabel('Save every N epochs', { exact: true }).fill('2');
+  await page.waitForFunction(async () => {
+    const state = await window.bluflow.request('state');
+    return JSON.stringify(state.validation.stages?.map((s) => s.epochs)) === '[10,10,30]';
+  });
+  assert.equal(await page.locator('[data-field="train.max_steps"]').count(), 0);
+  await page.getByText('1024px · 30 epochs · effective batch 1', { exact: true }).waitFor();
+  await page.screenshot({ path: path.join(artifacts, 'staged-epochs.png') });
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.waitForFunction(async () => !(await window.bluflow.request('state')).busy);
+  const epochRecipe = fs.readFileSync(path.join(configs, 'electron-smoke-edited.toml'), 'utf8');
+  assert.match(epochRecipe, /unit = "epochs"/);
+  assert.match(epochRecipe, /epochs = 50/);
+  assert.match(epochRecipe, /num_repeats = 1\.56/);
+  assert.doesNotMatch(epochRecipe, /max_steps/);
+  const stageValidation = await page.evaluate(
+    async () => (await window.bluflow.request('state')).validation,
+  );
+  assert.equal(stageValidation.valid, true, stageValidation.error + '\n' + epochRecipe);
+  await page.getByRole('checkbox', { name: 'Staged resolutions', exact: true }).uncheck();
+  await page.waitForFunction(
+    async () => !(await window.bluflow.request('state')).flat['resolution_schedule.enabled'],
   );
   await page.getByLabel('Search settings', { exact: true }).fill('text cache batch');
   await page.locator('[data-field="train.text_cache_batch_size"]').waitFor();
@@ -514,7 +584,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
     'Closing waits for pending final metrics export',
   );
   console.log(
-    'Electron smoke passed: all 201 editors, sampling controls and resolution previews, config save, immutable queue, subsets, search, preferences, four utility outputs, graph hover/zoom/pan/reset, console history/clear, offscreen PNG, compact layout and floating-panel persistence.',
+    'Electron smoke passed: all 203 editors, fractional repeats and image targets, sampling controls and resolution previews, config save, immutable queue, subsets, search, preferences, four utility outputs, graph hover/zoom/pan/reset, console history/clear, offscreen PNG, compact layout and floating-panel persistence.',
   );
 })()
   .catch(async (error) => {

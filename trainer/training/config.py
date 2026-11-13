@@ -498,7 +498,8 @@ def load_config(path: str | Path) -> Config:
     if not p.exists():
         raise FileNotFoundError(f"config not found: {p}")
     raw = tomllib.loads(p.read_text(encoding="utf-8"))
-    if raw.get('resolution_schedule', {}).get('enabled'):
+    if (raw.get('resolution_schedule', {}).get('enabled')
+            and raw['resolution_schedule'].get('unit', 'steps') == 'steps'):
         forbidden = {'epochs', 'save_every_epochs'} & raw.get('train', {}).keys()
         if forbidden:
             raise ValueError(f'Staged resolution training is step-driven; remove train keys {sorted(forbidden)}')
@@ -566,8 +567,10 @@ def load_config(path: str | Path) -> Config:
         for resolution in cfg.dataset.tiers:
             effective_shift(cfg.flow, resolution / 16, resolution / 16)
     cfg.resolution_schedule.validate(cfg)
-    if cfg.resolution_schedule.enabled:
+    if cfg.resolution_schedule.enabled and cfg.resolution_schedule.unit == 'steps':
         cfg.train.save_every_epochs = None
+    elif cfg.resolution_schedule.enabled:
+        cfg.train.max_steps = None
     validate_model_options(cfg)
     if not cfg.dataset.path and not cfg.dataset.subsets:
         raise ValueError("dataset.path (or a [[dataset.subsets]] list) is required")

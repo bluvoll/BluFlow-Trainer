@@ -520,13 +520,29 @@ with `torch_varlen`; set it to false for the per-tier example above. Packing,
 batch size, and accumulation affect optimizer updates per epoch—compare runs by
 updates and samples seen as well as epochs.
 
+### Image targets and fractional repeats
+
+Both desktop UIs offer a **Repeats / Target images** switch for the dataset and
+each subset. `num_repeats = 1.56` uses one full copy plus a sampled 56% of the
+eligible sources per epoch. `target_images = 250` selects exactly 250 source
+appearances, repeating whole copies when needed. The sampled remainder rotates
+reproducibly each epoch using the training seed. Weighting happens before
+resolution expansion: the same selection is used at every configured tier,
+subject to tier collapse. Distributed batching can add padding at the end.
+
+Use either `num_repeats` or `target_images` in `[dataset]` or individual
+`[[dataset.subsets]]` tables. `target_images` takes precedence when present;
+existing integer repeats retain their multiplier meaning. Zero disables a
+source; the combined dataset must remain nonempty. Cache all eligible sources,
+including those not selected in the first epoch.
+
 ### Staged resolution LoRA training (experimental)
 
 [Staged MOSS preset](configs/moss-image-lora-staged.toml) trains one resolution tier
 at a time, with its own per-GPU batch size. It supports PEFT LoRA and LyCORIS
-LoCon, cached latents, and packed varlen attention. This mode uses **successful
-optimizer updates**, never epochs: `train.max_steps` is required; `epochs` and
-`save_every_epochs` are rejected. Existing non-staged runs are unchanged.
+LoCon, cached latents, and packed varlen attention. Choose **Steps** or **Epochs**
+in Stage duration. Steps remain the default: `train.max_steps` counts successful
+optimizer updates, and epoch settings are omitted. Existing non-staged runs are unchanged.
 
 ```toml
 [resolution_schedule]
@@ -546,6 +562,15 @@ stages. The GUI's **Staged Resolutions** table previews the exact budgets and
 effective batch sizes. Configure batches under **Batching** and matching tiers
 under **Dataset**. Windows requires a compatible `flash_attn_2` installation.
 
+For epoch duration, set `unit = "epochs"` in `[resolution_schedule]` and
+`epochs = 50` in `[train]`. The example's shares allocate **10/10/30 whole
+epochs**. Rounding preserves the total and requires at least one epoch per stage.
+Each epoch completes a weighted dataset pass at the active resolution; skipped
+updates do not extend it. The total update budget is derived from those passes,
+per-tier batch sizes, GPU count, and gradient accumulation. `save_every_epochs`
+uses cumulative run epochs. Epoch mode ignores `train.max_steps`; the explicit
+CLI `--max-steps` override selects step mode.
+
 Packing combines aspect ratios only within the active tier. Shuffled sample
 streams wrap to fill complete batches; repeats and subsets retain their dataset
 weights. Small sources remain eligible at later tiers without forced upscaling,
@@ -560,8 +585,8 @@ Warmup and decay still apply: a decaying schedule does not restart or regain its
 configured peak when the 1024 stage begins.
 
 The optimizer and LR schedule continue across stages, with one warmup. New
-shapes can compile at transitions. Skipped nonfinite attempts do not advance the
-stage or scheduler; repeated nonfinite updates still stop training. Metrics show
+shapes can compile at transitions. In step mode, skipped nonfinite attempts do not advance the
+stage. Skipped attempts never advance the optimizer or scheduler; repeated nonfinite updates still stop training. Metrics show
 stage progress, images consumed (including skipped attempts), and effective batch.
 Optional stage saves use normal step checkpoint filenames; the final stage uses
 the normal final save. `save_every_steps` also works.

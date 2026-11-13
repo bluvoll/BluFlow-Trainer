@@ -198,11 +198,21 @@ def prune_defaults(flat: dict) -> dict:
     # GUI keeps a value in the path box even after subsets are added. Emit the one in effect.
     if out.get("dataset.subsets"):
         out.pop("dataset.path", None)
+        out.pop('dataset.num_repeats', None)
+        out.pop('dataset.target_images', None)
+        out['dataset.subsets'] = [{k: v for k, v in s.items() if v is not None
+                                  and not (k == 'num_repeats' and s.get('target_images') is not None)}
+                                 for s in out['dataset.subsets']]
     else:
         out.pop("dataset.subsets", None)
     if flat.get('resolution_schedule.enabled'):
-        out.pop('train.epochs', None)
-        out.pop('train.save_every_epochs', None)
+        if flat.get('resolution_schedule.unit', 'steps') == 'steps':
+            out.pop('train.epochs', None)
+            out.pop('train.save_every_epochs', None)
+        else:
+            out.pop('train.max_steps', None)
+    if flat.get('dataset.target_images') is not None:
+        out.pop('dataset.num_repeats', None)
     return out
 
 
@@ -282,7 +292,9 @@ def summarize(flat: dict) -> str:
     bits = [mode, f"{'/'.join(str(t) for t in tiers)}px"]
 
     if flat.get('resolution_schedule.enabled'):
-        bits.append(f"{flat.get('train.max_steps')} successful updates / staged resolutions")
+        duration = (f"{flat.get('train.epochs')} epochs" if flat.get('resolution_schedule.unit') == 'epochs'
+                    else f"{flat.get('train.max_steps')} successful updates")
+        bits.append(f"{duration} / staged resolutions")
     # Whether a run crops is decided by the curriculum, which lives in a table on another tab --
     # so without this the status bar reads identically for a plain LoRA and a texture run.
     phases = flat.get("curriculum") or []
