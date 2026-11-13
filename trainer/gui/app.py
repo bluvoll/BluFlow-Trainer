@@ -94,6 +94,9 @@ _RULES = {
         'weight', 'discriminator_lr', 'warm_start')},
     **{f'perceptual.{option}': (lambda c: bool(c.get('perceptual.enabled'))) for option in (
         'weight', 'max_t', 'every', 'cache_dir', 'eye_manifest', 'dedicated_low_noise')},
+    **{f'slider.{option}': (lambda c: bool(c.get('slider.enabled'))) for option in (
+        'target_class', 'positive_prompt', 'negative_prompt', 'anchor_class',
+        'guidance_strength', 'anchor_strength')},
     **{f'self_flow.{option}': (lambda c: bool(c.get('self_flow.enabled'))) for option in (
         'ema_dtype', 'ema_device', 'adaln_fp32', 'stochastic_rounding', 'decay', 'weight')},
     # Measured: under `uniform`, scale 0.5/1.0/2.0 give byte-identical distributions.
@@ -194,6 +197,12 @@ _RULES = {
 
 def _has_texture_phase(c: dict) -> bool:
     return any(p.get("mode") == "texture" for p in (c.get("curriculum") or []))
+
+
+def _captions_optional(c: dict) -> bool:
+    """Cache images that have no .txt caption. Mirrors `cache_latents.captions_optional`: slider
+    steps never read dataset captions, so a slider dataset needs none."""
+    return bool(c.get("dataset.allow_missing_captions") or c.get("slider.enabled"))
 
 
 # Derived from the schema rather than listed, so adding a texture key cannot leave it ungated --
@@ -1455,6 +1464,7 @@ class TrainingGUI(QtWidgets.QWidget):
             bucket_reso_steps=flat.get("dataset.bucket_reso_steps") or 64,
             upscale=not flat.get("dataset.bucket_no_upscale", True),
             multires_training=bool(flat.get("dataset.multires_training")),
+            allow_missing_captions=_captions_optional(flat),
             gpus=self.gpu_arg(),
         )) for pth in self._dataset_paths(flat)]
 
@@ -1569,6 +1579,7 @@ class TrainingGUI(QtWidgets.QWidget):
             bucket_reso_steps=c.get("dataset.bucket_reso_steps") or 64,
             upscale=not c.get("dataset.bucket_no_upscale", True),
             multires_training=bool(c.get("dataset.multires_training")),
+            allow_missing_captions=_captions_optional(c),
             dry_run=dry, gpus=self.gpu_arg(),
         ) for p in paths], "Caching")
 
