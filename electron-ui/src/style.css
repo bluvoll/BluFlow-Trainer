@@ -397,7 +397,7 @@ h2 {
   overflow: auto;
   overflow-x: hidden;
 }
-.navigation-panel .search-input {
+.navigation-panel input.search-input {
   width: calc(100% - 20px);
   margin: 10px;
 }
