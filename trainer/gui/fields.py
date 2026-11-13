@@ -182,10 +182,20 @@ class FloatEditor(_Blockable):
         w.valueChanged.connect(self._emit)
 
     def get(self):
-        return float(self.widget.value())
+        current = float(self.widget.value())
+        # Display precision must not change an untouched TOML value (e.g. 1/9).
+        if current == getattr(self, '_rendered_value', None):
+            return self._original_value
+        return current
 
     def _set(self, value):
-        self.widget.setValue(float(value or 0.0))
+        original = float(value or 0.0)
+        self.widget.setValue(original)
+        self._rendered_value = float(self.widget.value())
+        self._original_value = (
+            original if self.widget.minimum() <= original <= self.widget.maximum()
+            else self._rendered_value
+        )
 
 
 class SciEditor(_Blockable):
@@ -737,17 +747,7 @@ class CurriculumEditor(_Blockable):
 # conversion is enforced rather than guessed.
 # `lr_mul` is omitted throughout: the reference does not vary it across these phases, and 1.0 is an
 # exact no-op, so writing it would be nine lines of noise in the saved TOML.
-TRAINTRAIN_CURRICULUM = [
-    {"at": 0.00, "t_range": [0.0, 1.0], "mode": "fullres"},
-    {"at": 0.10, "t_range": [0.0, 1.0], "mode": "texture"},
-    {"at": 0.15, "t_range": [0.0, 0.6], "mode": "texture"},
-    {"at": 0.40, "t_range": [0.0, 1.0], "mode": "texture"},
-    {"at": 0.45, "t_range": [0.0, 0.6], "mode": "texture"},
-    {"at": 0.60, "t_range": [0.0, 1.0], "mode": "texture"},
-    {"at": 0.65, "t_range": [0.0, 0.6], "mode": "texture"},
-    {"at": 0.80, "t_range": [0.0, 1.0], "mode": "texture"},
-    {"at": 0.85, "t_range": [0.0, 0.6], "mode": "texture"},
-]
+from ..ui_core.presets import TRAINTRAIN_CURRICULUM
 
 
 class SubsetEditor(_Blockable):

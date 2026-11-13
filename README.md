@@ -52,6 +52,12 @@ Kahan stays optional and off by default; better update precision does not guaran
 better visual results. Native Windows validation below was performed on 0.2.4.
 
 To launch from an already configured environment, use `python -m trainer.gui`.
+An optional Electron desktop provides the same training workflows in a dockable
+workspace. After the trainer is installed, run `setup-electron.bat` then
+`start-electron.bat` on Windows, or `bash setup-electron.sh` then
+`bash start-electron.sh` on Linux. Requires Node.js 22.12 or newer.
+See the [Electron UI guide](docs/electron-ui.md) for setup, features, and verification.
+
 Run CLI commands below with that environment activated, or substitute its Python
 executable (`venv/bin/python` on Linux, `venv\Scripts\python.exe` on Windows).
 

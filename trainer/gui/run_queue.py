@@ -1,6 +1,5 @@
 """Session-local training queue with independent config snapshots."""
 from collections import Counter
-from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import tempfile
@@ -8,16 +7,7 @@ import tempfile
 from PySide6 import QtCore, QtWidgets
 
 from .widgets import make_btn, usable_dialog_start
-
-
-@dataclass
-class QueueEntry:
-    id: int
-    source: Path
-    snapshot: Path
-    digest: str
-    status: str = "Pending"
-    error: str = ""
+from ..ui_core.queue import QueueEntry, snapshot_file
 
 
 class RunQueueWidget(QtWidgets.QWidget):
@@ -115,16 +105,14 @@ class RunQueueWidget(QtWidgets.QWidget):
                 digest = hashlib.sha256(data).hexdigest()
                 if any(e.source == path and e.digest == digest for e in self.entries()):
                     continue
-                snapshot = Path(self._snapshots.name) / f"{self._next_id:04d}-{path.name}"
-                snapshot.write_bytes(data)
+                entry = snapshot_file(path, self._snapshots.name, self._next_id, data)
             except OSError as exc:
                 errors.append(f"Could not queue {path}: {exc}")
                 continue
-            entry = QueueEntry(self._next_id, path, snapshot, digest)
             self._next_id += 1
             item = QtWidgets.QListWidgetItem(f"Pending — {path}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, entry)
-            item.setToolTip(f"{path}\nSaved snapshot: {snapshot}")
+            item.setToolTip(f"{path}\nSaved snapshot: {entry.snapshot}")
             self.list.addItem(item)
             added.append(entry)
         if added or errors:

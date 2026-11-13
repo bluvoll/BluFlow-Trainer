@@ -106,7 +106,8 @@ def test_picker_mtime_order_with_external_file_and_preserved_selection(gui, tmp_
     paths = [gui.config_dir / "a-old.toml", gui.config_dir / "z-new.toml", tmp_path / "external.toml"]
     for i, path in enumerate(paths):
         bridge.write_toml(path, gui.collect() | {"train.run_name": path.stem})
-        os.utime(path, ns=(1000 + i, 1000 + i))
+        # NTFS rounds timestamps to 100 ns; keep distinct times on both platforms.
+        os.utime(path, ns=(1_000_000_000 * (i + 1), 1_000_000_000 * (i + 1)))
     gui._external.extend([paths[2], paths[2], tmp_path / "gone.toml"])
     gui._load_presets(select=paths[0])
     assert [Path(gui.preset_combo.itemData(i)) for i in range(3)] == list(reversed(paths))

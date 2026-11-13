@@ -17,6 +17,9 @@ The vendored portion is the GUI chrome in `trainer/gui/`, derived from Aozora's
                             CustomFolderDialog and GraphPanel, with Aozora's
                             SDXL- and timestep-allocation-specific code removed
   trainer/gui/process.py   -- ProcessRunner derived from Aozora's, retargeted
+  trainer/ui_core/process.py -- shared headless worker extracted from ProcessRunner;
+                               trainer/gui/process.py now adapts it to Qt signals
+  trainer/ui_core/console.py -- CompressedLogBuffer extracted from the GUI widgets
 
 A full copy of the Apache License 2.0 as distributed with Aozora is kept at
 `trainer/gui/LICENSE.Aozora`.

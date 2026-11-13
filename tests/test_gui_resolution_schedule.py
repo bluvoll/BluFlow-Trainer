@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6 import QtWidgets
 
@@ -14,6 +15,8 @@ def test_bridge_staged_round_trip_omits_epochs(tmp_path):
     import tomllib
     from trainer.training.config import load_config
     flat = {**bridge.defaults(), **bridge.flatten(tomllib.loads(config_text()))}
+    if sys.platform == 'win32':
+        flat['train.attention_backend'] = 'flash_attn_2'
     flat['train.epochs'] = 100
     flat['train.save_every_epochs'] = 2
     text = bridge.dump_toml(flat)
