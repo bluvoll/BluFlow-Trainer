@@ -85,6 +85,12 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.getByTestId('app').waitFor({ timeout: 60000 });
+  // Dock widths scale with the initial window, which depends on the host display.
+  // Reset at a known viewport so later column-count assertions test identical
+  // panel proportions on Windows CI, Xvfb, and a developer's desktop.
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.getByText('Panels', { exact: true }).click();
+  await page.getByRole('button', { name: 'Reset workspace layout', exact: true }).click();
   // Keep stage/batch expectations independent of the host's detected GPU count.
   // This selects a fixture setting only; the smoke test never starts GPU work.
   await page.evaluate(async () => {
