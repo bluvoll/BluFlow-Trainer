@@ -1,6 +1,7 @@
 const { _electron: electron } = require('playwright');
 const { verifyStartup } = require('./startup.cjs');
 const { spawnSync } = require('node:child_process');
+const { setTimeout: delay } = require('node:timers/promises');
 const fs = require('node:fs'),
   path = require('node:path'),
   assert = require('node:assert/strict');
@@ -9,6 +10,11 @@ const artifacts = path.join(root, '.artifacts/electron-smoke');
 fs.mkdirSync(artifacts, { recursive: true });
 const profile = fs.mkdtempSync(path.join(artifacts, 'profile-'));
 const configs = path.join(profile, 'configs');
+async function waitForFile(file) {
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(file) && Date.now() < deadline) await delay(50);
+  assert.ok(fs.existsSync(file), `Expected saved file: ${file}`);
+}
 fs.mkdirSync(configs);
 fs.writeFileSync(
   path.join(configs, 'smoke.toml'),
@@ -133,7 +139,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
     fs.existsSync(path.join(configs, 'smoke.toml')),
     'Renaming must preserve the original config',
   );
-  assert.ok(fs.existsSync(path.join(configs, 'electron-smoke-edited.toml')));
+  await waitForFile(path.join(configs, 'electron-smoke-edited.toml'));
   await page.getByRole('button', { name: 'Save & add to queue', exact: true }).click();
   await page.waitForFunction(
     async () => (await window.bluflow.request('state')).queue.length === 1,
