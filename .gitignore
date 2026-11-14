@@ -12,6 +12,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 build/
+electron-ui/node_modules/
+electron-ui/dist/
+.artifacts/
 
 # Checkpoints, samples and per-run config copies.
 output/

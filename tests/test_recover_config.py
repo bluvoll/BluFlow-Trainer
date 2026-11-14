@@ -1,4 +1,5 @@
 import json
+import sys
 import tomllib
 
 import pytest
@@ -11,6 +12,9 @@ from trainer.training.config import load_config
 
 
 def checkpoint(tmp_path, text, **metadata):
+    # This helper builds valid checkpoints; packed Windows training uses FA2.
+    if sys.platform == 'win32':
+        text = text.replace('attention_backend = "torch_varlen"', 'attention_backend = "flash_attn_2"')
     original = tmp_path / 'original.toml'
     original.write_text(text, encoding='utf-8')
     cfg = load_config(original)

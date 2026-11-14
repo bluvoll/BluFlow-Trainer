@@ -16,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import zlib
 from bisect import bisect_left, bisect_right
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +25,8 @@ from PySide6.QtCore import QFileInfo
 from PySide6.QtWidgets import QFileIconProvider
 
 from .theme import THEME, make_stylesheet, set_role
+from ..ui_core.paths import platform_path, safe_stem
+from ..ui_core.console import CompressedLogBuffer
 
 # Compatibility aliases keep feature code readable while every value comes from
 # the single semantic palette in gui_theme.py.
@@ -48,16 +49,6 @@ IS_WINDOWS = os.name == "nt"
 IS_LINUX = sys.platform.startswith("linux")
 
 
-def platform_path(value):
-    """Normalize a user/config path for the host OS without resolving symlinks."""
-    text = os.path.expandvars(os.path.expanduser(str(value or "").strip()))
-    if not text:
-        return ""
-    if not IS_WINDOWS:
-        text = text.replace("\\", "/")
-    return os.path.normpath(text)
-
-
 def usable_dialog_start(value, fallback=None):
     candidate = platform_path(value)
     if candidate and os.path.exists(candidate):
@@ -66,42 +57,6 @@ def usable_dialog_start(value, fallback=None):
     if fallback and os.path.isdir(fallback):
         return fallback
     return QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.HomeLocation) or str(Path.home())
-
-
-_STEM_EXTRA = set("-_.")
-# Windows resolves these as DOS devices whatever the extension, so `CON.toml` is not a file --
-# opening it succeeds and writes to the console. Case-insensitive, and still reserved with a
-# suffix. ext4 does not care, but a config is meant to be portable between the two.
-_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL",
-                 *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
-
-
-def safe_stem(name, fallback="gui_run"):
-    """`train.run_name` -> a filename stem that is legal on both platforms.
-
-    `run_name` is free text and reaches the filesystem three ways -- the config file, the
-    checkpoint stem and the state directory -- so a name with a slash in it does not fail at save
-    time, it fails several hours later at the first checkpoint. Windows additionally rejects
-    `<>:"/\\|?*`, trailing dots and trailing spaces.
-
-    Accented and non-Latin letters are KEPT: `str.isalnum()` is unicode-aware and both NTFS and
-    ext4 store them fine, so folding them to ASCII would mangle perfectly good names (`sesión` ->
-    `sesi-n`) for no safety gain. Only genuinely illegal characters collapse, to a single `-`, so
-    the common case stays readable: `my run 2` -> `my-run-2`.
-    """
-    text = str(name or "").strip()
-    out = []
-    for ch in text:
-        if ch.isalnum() or ch in _STEM_EXTRA:
-            out.append(ch)
-        elif out and out[-1] != "-":
-            out.append("-")
-    # A leading dot hides the file on unix; a trailing dot or dash is legal but reads as a typo,
-    # and Windows silently strips trailing dots, which would make two names collide.
-    stem = "".join(out).strip("-.")
-    if stem.upper() in _WIN_RESERVED:
-        stem += "-run"
-    return stem or fallback
 
 
 def report_gui_exception(context, exc):
@@ -647,119 +602,6 @@ def form_row(layout, label_text, widget, tooltip=None):
         widget.setToolTip(tooltip)
     layout.addRow(lbl, widget)
 
-class CompressedLogBuffer:
-    def __init__(self, block_size=128, compression_level=6, max_active_bytes=64 * 1024):
-        self.block_size = max(16, int(block_size))
-        self.compression_level = max(1, min(9, int(compression_level)))
-        self.max_active_bytes = max(4096, int(max_active_bytes))
-        self.blocks = []
-        self.current_lines = []
-        self.current_bytes = 0
-        self.line_count = 0
-        self.uncompressed_bytes = 0
-        self.compressed_bytes = 0
-
-    def clear(self):
-        self.blocks.clear()
-        self.current_lines.clear()
-        self.current_bytes = 0
-        self.line_count = 0
-        self.uncompressed_bytes = 0
-        self.compressed_bytes = 0
-
-    def append(self, text, replace_last=False):
-        if replace_last:
-            self.remove_last_line()
-        lines = str(text).rstrip('\n').splitlines()
-        if not lines:
-            lines = [""]
-        for line in lines:
-            line_bytes = len(line.encode('utf-8', errors='replace')) + 1
-            self.current_lines.append(line)
-            self.current_bytes += line_bytes
-            self.line_count += 1
-            self.uncompressed_bytes += line_bytes
-            if len(self.current_lines) >= self.block_size or self.current_bytes >= self.max_active_bytes:
-                self._seal_current_block()
-
-    def remove_last_line(self):
-        if self.line_count <= 0:
-            return
-        if self.current_lines:
-            removed = self.current_lines.pop()
-            self.current_bytes = max(0, self.current_bytes - len(removed.encode('utf-8', errors='replace')) - 1)
-            self.line_count -= 1
-            self.uncompressed_bytes = max(0, self.uncompressed_bytes - len(removed.encode('utf-8', errors='replace')) - 1)
-            return
-        if not self.blocks:
-            return
-        lines = self._decode_block(len(self.blocks) - 1)
-        old_payload_size = len(self.blocks[-1][1])
-        if lines:
-            removed = lines.pop()
-            self.line_count -= 1
-            self.uncompressed_bytes = max(0, self.uncompressed_bytes - len(removed.encode('utf-8', errors='replace')) - 1)
-        self.blocks.pop()
-        self.compressed_bytes = max(0, self.compressed_bytes - old_payload_size)
-        if lines:
-            self.current_lines = lines
-            self.current_bytes = sum(len(line.encode('utf-8', errors='replace')) + 1 for line in self.current_lines)
-            if len(self.current_lines) >= self.block_size or self.current_bytes >= self.max_active_bytes:
-                self._seal_current_block()
-
-    def get_lines(self, start_line, count):
-        if count <= 0 or self.line_count <= 0:
-            return []
-        start_line = max(0, min(int(start_line), self.line_count - 1))
-        end_line = min(self.line_count, start_line + int(count))
-        output = []
-        cursor = 0
-        for line_count, payload in self.blocks:
-            block_start = cursor
-            block_end = cursor + line_count
-            if block_end > start_line and block_start < end_line:
-                lines = zlib.decompress(payload).decode('utf-8', errors='replace').split('\n')
-                local_start = max(0, start_line - block_start)
-                local_end = min(line_count, end_line - block_start)
-                output.extend(lines[local_start:local_end])
-            cursor = block_end
-            if cursor >= end_line:
-                break
-        if cursor < end_line and self.current_lines:
-            block_start = cursor
-            block_end = cursor + len(self.current_lines)
-            if block_end > start_line and block_start < end_line:
-                local_start = max(0, start_line - block_start)
-                local_end = min(len(self.current_lines), end_line - block_start)
-                output.extend(self.current_lines[local_start:local_end])
-        return output
-
-    def memory_summary(self):
-        stored = self.compressed_bytes + self.current_bytes
-        ratio = 1.0 if self.uncompressed_bytes <= 0 else stored / self.uncompressed_bytes
-        return stored, self.uncompressed_bytes, ratio
-
-    def get_all_text(self):
-        if self.line_count <= 0:
-            return ""
-        return "\n".join(self.get_lines(0, self.line_count))
-
-    def _seal_current_block(self):
-        if not self.current_lines:
-            return
-        raw = '\n'.join(self.current_lines).encode('utf-8', errors='replace')
-        payload = zlib.compress(raw, self.compression_level)
-        self.blocks.append((len(self.current_lines), payload))
-        self.compressed_bytes += len(payload)
-        self.current_lines = []
-        self.current_bytes = 0
-
-    def _decode_block(self, index):
-        if not (0 <= index < len(self.blocks)):
-            return []
-        line_count, payload = self.blocks[index]
-        lines = zlib.decompress(payload).decode('utf-8', errors='replace').split('\n')
-        return lines[:line_count]
 
 
 class VirtualConsoleWidget(QtWidgets.QWidget):

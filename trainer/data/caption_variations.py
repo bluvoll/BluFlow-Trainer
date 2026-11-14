@@ -299,8 +299,11 @@ class CaptionVariationCache:
             db.commit()
             db.close()
 
-    def caption(self, index, epoch):
+    def caption(self, index, epoch, occurrence=None):
         pool, ordinal = self.indices[index]
+        if occurrence is not None:
+            # Pair epoch and within-epoch appearance without colliding with another visit.
+            epoch = (epoch + occurrence) * (epoch + occurrence + 1) // 2 + occurrence
         visit = epoch * self.totals[pool] + ordinal
         cycle, offset = divmod(visit, self.count)
         # Affine permutation is O(1) space/time and visits each slot once per cycle.

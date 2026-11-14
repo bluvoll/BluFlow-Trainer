@@ -1,4 +1,4 @@
-"""Step budgets for staged-resolution MOSS adapters; no epoch-based semantics."""
+"""Whole-unit budgets for staged-resolution MOSS adapters."""
 from dataclasses import dataclass, field
 import math
 
@@ -23,8 +23,11 @@ class ResolutionSchedule:
     enabled: bool = False
     save_stage_end: bool = True
     stages: list = field(default_factory=list)
+    unit: str = 'steps'
 
     def __post_init__(self):
+        if self.unit not in ('steps', 'epochs'):
+            raise ValueError('resolution_schedule.unit must be steps or epochs')
         if type(self.enabled) is not bool or type(self.save_stage_end) is not bool:
             raise ValueError('Resolution schedule enabled/save_stage_end must be booleans')
         self.stages = [ResolutionStage(**s) if isinstance(s, dict) else s for s in self.stages]
@@ -38,14 +41,14 @@ class ResolutionSchedule:
 
     def budgets(self, steps):
         if type(steps) is not int or steps <= 0:
-            raise ValueError('Staged resolution training requires a positive train.max_steps')
+            raise ValueError(f'Staged resolution training requires a positive train.{"epochs" if self.unit == "epochs" else "max_steps"}')
         exact = [steps * s.share / sum(p.share for p in self.stages) for s in self.stages]
         result = [math.floor(x) for x in exact]
         order = sorted(range(len(result)), key=lambda i: (-(exact[i] - result[i]), i))
         for i in order[:steps - sum(result)]:
             result[i] += 1
         if any(x < 1 for x in result):
-            raise ValueError('Every resolution stage must receive at least one update')
+            raise ValueError(f'Every resolution stage must receive at least one {"epoch" if self.unit == "epochs" else "update"}')
         return result
 
     def validate(self, cfg):
@@ -58,7 +61,7 @@ class ResolutionSchedule:
             raise ValueError('Staged resolution training currently supports MOSS only')
         if cfg.adapter.kind not in ('lora', 'lycoris_lora') or (cfg.adapter.kind == 'lycoris_lora' and cfg.adapter.lycoris_algo != 'locon'):
             raise ValueError('Staged resolution training requires PEFT LoRA or LyCORIS LoCon')
-        self.budgets(cfg.train.max_steps)
+        self.budgets(cfg.train.epochs if self.unit == 'epochs' else cfg.train.max_steps)
         if not cfg.train.pack_resolutions or cfg.train.attention_backend not in ('torch_varlen', 'flash_attn_2'):
             raise ValueError('Staged resolution training requires packing and varlen attention')
         if not isinstance(cfg.train.batch_size, dict):

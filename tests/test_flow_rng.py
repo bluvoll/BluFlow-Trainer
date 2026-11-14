@@ -89,6 +89,10 @@ def test_trainer_save_resume_restores_next_draws(tmp_path):
     trainer.timing = TrainingTiming()
     trainer.accelerator=acc
     trainer.cfg=NS(train=NS(run_name='rng',gradient_accumulation_steps=1),quant=NS(mode='none'))
+    from trainer.training.block_lr import BlockLRConfig
+    from trainer.training.resolution_schedule import ResolutionSchedule
+    trainer.cfg.block_lr = BlockLRConfig()
+    trainer.cfg.resolution_schedule = ResolutionSchedule()
     trainer.out_dir=tmp_path
     trainer.flow_rng=FlowRNG(42,0,1,'cpu')
     trainer.source_checkpoint=None

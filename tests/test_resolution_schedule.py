@@ -1,5 +1,6 @@
 """Staged budgets, sampling, config, and the real training loop on a tiny MOSS."""
 import copy
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -74,7 +75,7 @@ def test_ranks_share_shuffle_without_double_sharding(tmp_path):
 
 
 def config_text():
-    return '''
+    text = '''
 [dataset]
 path = "/test"
 source = "latents"
@@ -91,6 +92,7 @@ kind = "lora"
 enabled = true
 stages = [{resolution=512,share=0.2,lr_mul=0.8},{resolution=768,share=0.2,lr_mul=0.9},{resolution=1024,share=0.6,lr_mul=1.0}]
 '''
+    return text.replace('torch_varlen', 'flash_attn_2') if sys.platform == 'win32' else text
 
 
 def test_config_and_epoch_rejection(tmp_path):
@@ -117,7 +119,7 @@ def test_invalid_modes_rejected(tmp_path, change):
         load_config(p)
 
 
-def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2):
+def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2, epoch_mode=False, data_setup=None):
     from trainer.training.train import Trainer
     from trainer.training.params import AdapterConfig, apply_adapter
     from test_moss_image import tiny
@@ -126,6 +128,9 @@ def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2):
     from trainer.data.dataset import DatasetConfig
     cfg = Config(dataset=DatasetConfig(path=str(root)))
     cfg.resolution_schedule = plan()
+    if epoch_mode:
+        cfg.resolution_schedule.unit = 'epochs'
+        cfg.train.epochs = 5
     cfg.train.batch_size = {512: 3, 768: 2, 1024: 1}
     cfg.train.max_steps = 5
     cfg.train.num_workers = workers
@@ -144,14 +149,17 @@ def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2):
     trainer = Trainer.__new__(Trainer)
     trainer.cfg, trainer.accelerator = cfg, acc
     trainer.dataset = Samples(root)
-    trainer.sampler = StagedBatchSampler(trainer.dataset, cfg.train.batch_size, plan(), 5,
+    trainer.sampler = StagedBatchSampler(trainer.dataset, cfg.train.batch_size, cfg.resolution_schedule, 5,
                                         world=acc.num_processes, rank=acc.process_index,
                                         accumulation=accumulation, seed=42)
     trainer.stage_index, trainer.stage_cursor = -1, 0
+    trainer.stage_epoch = 0
     trainer.stage_images = [0]*3
     trainer.stage_attempts = [0]*3
-    trainer.total_steps = 5
+    trainer.total_steps = sum(trainer.sampler.budgets)
     trainer.steps_per_epoch = 0
+    if data_setup is not None:
+        data_setup(trainer)
     trainer.groups = [{'params': [p for p in model.parameters() if p.requires_grad]}]
     trainer._build_optimizer()
     trainer.transformer, trainer.optimizer, trainer.scheduler = acc.prepare(model, trainer.optimizer, trainer.scheduler)
@@ -166,7 +174,8 @@ def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2):
         lambda opt, args, kwargs: trainer.lr_trace.append([g['lr'] for g in opt.param_groups]))
     trainer.trace = []
     def step(batch):
-        xs = [x.to(device=acc.device, dtype=next(model.parameters()).dtype) for x in batch['latents']]
+        xs = [(x.unsqueeze(0) if x.ndim == 4 else x).to(device=acc.device, dtype=next(model.parameters()).dtype)
+              for x in batch['latents']]
         count = len(xs)
         times = torch.full((count,), .4, device=acc.device)
         text = torch.ones(count, 3, 16, device=acc.device, dtype=xs[0].dtype)

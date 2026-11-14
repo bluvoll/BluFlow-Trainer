@@ -1,0 +1,4 @@
+setup-electron.sh text eol=lf
+start-electron.sh text eol=lf
+setup-electron.bat text eol=crlf
+start-electron.bat text eol=crlf

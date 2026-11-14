@@ -795,10 +795,12 @@ def main() -> int:
                    or os.environ.get("CUDA_VISIBLE_DEVICES") is not None))
 
     # The GUI-side selector, which is what feeds training_env.
-    r.append(check("all GPUs selected -> no CUDA_VISIBLE_DEVICES override", gui.gpu_arg() == "",
+    default_gpus = sorted(gui.gpu_boxes) if MULTI_GPU_SUPPORTED else sorted(gui.gpu_boxes)[:1]
+    expected_gpu_arg = "" if len(default_gpus) == len(gui.gpu_boxes) else ",".join(map(str, default_gpus))
+    r.append(check("default GPU selection follows platform support", gui.selected_gpus() == default_gpus and gui.gpu_arg() == expected_gpu_arg,
                    gui.gpu_arg()))
     r.append(check("process count is derived from the selection, never typed",
-                   gui.num_processes() == len(gui.gpu_boxes)))
+                   gui.num_processes() == len(default_gpus)))
     if len(gui.gpu_boxes) > 1:
         first = sorted(gui.gpu_boxes)[0]
         for i, b in gui.gpu_boxes.items():

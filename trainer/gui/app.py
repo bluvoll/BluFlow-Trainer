@@ -83,139 +83,7 @@ def detect_gpus() -> list[tuple[int, str]]:
         return [(0, "GPU 0")]
 
 
-# Controls that exist but would do nothing in the current combination. Each entry is
-# key -> predicate(flat_config) -> enabled.
-_RULES = {
-    **{f'paired_texture.{option}': (lambda c: float(c.get('paired_texture.scale') or 0) > 0) for option in (
-        'levels', 'patch', 'tokens', 'features', 'seed', 'snr_cut', 'min_gate')},
-    **{f'flow.{option}': (lambda c: float(c.get('flow.hf_scale') or 0) > 0) for option in (
-        'hf_high_noise_snr_cut', 'hf_high_noise_min_weight', 'hf_high_noise_power')},
-    **{f'adversarial.{option}': (lambda c: bool(c.get('adversarial.enabled'))) for option in (
-        'weight', 'discriminator_lr', 'warm_start')},
-    **{f'perceptual.{option}': (lambda c: bool(c.get('perceptual.enabled'))) for option in (
-        'weight', 'max_t', 'every', 'cache_dir', 'eye_manifest', 'dedicated_low_noise')},
-    **{f'self_flow.{option}': (lambda c: bool(c.get('self_flow.enabled'))) for option in (
-        'ema_dtype', 'ema_device', 'adaln_fp32', 'stochastic_rounding', 'decay', 'weight')},
-    # Measured: under `uniform`, scale 0.5/1.0/2.0 give byte-identical distributions.
-    "flow.sigmoid_scale": lambda c: c.get("flow.timestep_sample_method") == "logit_normal",
-    "flow.shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
-    "flow.flux_shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
-    **{f"flow.moss_{option}": (lambda c: c.get("flow.timestep_sample_method") == "moss")
-       for option in ("mu", "std", "cutoff", "uniform_mix", "p_full", "steps")},
-    "flow.dual_timestep_mask_ratio": lambda c: bool(c.get("flow.dual_timestep")),
-    "flow.hf_exponent": lambda c: float(c.get("flow.hf_scale") or 0) > 0,
-    **{f"rti.{option}": (lambda c: bool(c.get("rti.enabled"))) for option in (
-        "dense_prefix_blocks", "dense_suffix_blocks", "size_buckets", "start_keep", "target_keep",
-        "identity_steps", "warmup_steps", "anneal_steps", "budget_steps")},
-
-    "quant.matmul_tuning": lambda c: (c.get("quant.preset") in ("balanced", "fast") or (
-        c.get("quant.backend") == "sdnq" and c.get("quant.mode") == "frozen" and c.get("quant.use_quantized_matmul") is True)),
-    "train.epochs": lambda c: not c.get("resolution_schedule.enabled"),
-    "train.save_every_epochs": lambda c: not c.get("resolution_schedule.enabled"),
-    "dataset.tier_collapse": lambda c: bool(c.get("dataset.resolutions")) and not c.get("resolution_schedule.enabled"),
-    "resolution_schedule.stages": lambda c: bool(c.get("resolution_schedule.enabled")),
-    "resolution_schedule.save_stage_end": lambda c: bool(c.get("resolution_schedule.enabled")),
-    "train.resume_mode": lambda c: bool(c.get("train.resume_from")),
-    "train.moss_qkv_format": lambda c: (c.get("train.model_family") in ("auto", "moss_image")
-        and (c.get("adapter.kind") in ("none", "lora") or (c.get("adapter.kind") == "lycoris_lora" and c.get("adapter.lycoris_algo") == "locon"))),
-    "train.activation_offload_budget_mb": lambda c: bool(c.get("train.activation_offload")),
-    "train.activation_offload_pin_memory": lambda c: bool(c.get("train.activation_offload")),
-    "train.activation_offload_prefetch": lambda c: bool(c.get("train.activation_offload")) and bool(c.get("train.activation_offload_pin_memory")),
-    "dataset.resolution": lambda c: not c.get("dataset.resolutions"),
-    "dataset.min_source_area": lambda c: bool(c.get("dataset.resolutions")),
-    # Inert on the no_upscale path -- verified, 256/128/64 give identical buckets.
-    "dataset.min_bucket_reso": lambda c: not c.get("dataset.bucket_no_upscale", True),
-    "dataset.caption.mixed_weights": lambda c: c.get("dataset.caption.caption_mode") == "mixed",
-    "dataset.caption.shuffle_keep_first_n": lambda c: bool(c.get("dataset.caption.shuffle_tags")),
-    "dataset.caption.nl_keep_first_sentence":
-        lambda c: bool(c.get("dataset.caption.nl_shuffle_sentences")),
-
-    # Texture settings only mean anything if some phase asks for texture. There is no separate
-    # "texture mode" switch to gate on -- the curriculum IS the switch -- so the rule reads the
-    # phase list. `flow.phase_mapping` is inert without any curriculum at all, texture or not.
-    "flow.phase_mapping": lambda c: bool(c.get("curriculum")),
-
-    **{f"optimizer.{option}": (lambda c, option=option: supports(c.get("optimizer.kind"), option))
-       for option in ("betas", "eps", "use_kahan", "kahan_sum", "momentum",
-                      "quantize_state", "offload_state", "gradient_release", "norm_mode",
-                      "use_first_moment", "sinkhorn_iterations")},
-
-    "schedule.min_lr_ratio": lambda c: c.get("schedule.kind") != "constant",
-    "schedule.d": lambda c: c.get("schedule.kind") == "rex",
-    "schedule.global_d": lambda c: c.get("schedule.kind") == "rerex",
-    "schedule.local_d": lambda c: c.get("schedule.kind") == "rerex",
-    "schedule.weight_power": lambda c: c.get("schedule.kind") == "rerex",
-    "schedule.num_segments": lambda c: c.get("schedule.kind") == "rerex",
-
-    "train.text_cache_batch_size": lambda c: bool(c.get("train.cache_text_embeddings")),
-    "train.compile_text_encoder": lambda c: not bool(c.get("train.cache_text_embeddings")),
-    "train.text_encoder_embedding_only": lambda c: not bool(c.get("train.cache_text_embeddings")),
-    "train.caption_variations": lambda c: bool(c.get("train.cache_text_embeddings")),
-    "train.caption_cache_path": lambda c: bool(c.get("train.cache_text_embeddings")) and bool(c.get("train.caption_variations")),
-    "adapter.lycoris_algo": lambda c: c.get("adapter.kind") == "lycoris_lora",
-    "adapter.lycoris_bypass": lambda c: c.get("adapter.kind") == "lycoris_lora" and c.get("adapter.lycoris_algo") not in ("dora",),
-    "adapter.lycoris_wd_on_output": lambda c: c.get("adapter.kind") == "lycoris_lora" and c.get("adapter.lycoris_algo") in ("dora",),
-    "adapter.dtype": lambda c: c.get("adapter.kind") != "none",
-    "adapter.moss_train_text_refiner": lambda c: (c.get("train.model_family") in ("auto", "moss_image")
-        and c.get("adapter.kind") != "none"),
-    "block_lr.enabled": lambda c: bool(c.get('block_lr.enabled')) or (c.get("train.model_family") in ("auto", "moss_image") and (
-        c.get("adapter.kind") == "lora" or (c.get("adapter.kind") == "lycoris_lora"
-                                           and c.get("adapter.lycoris_algo") == "locon"))),
-    "block_lr.ranges": lambda c: bool(c.get("block_lr.enabled")),
-    "adapter.rank": lambda c: c.get("adapter.kind") != "none",
-    "adapter.alpha": lambda c: c.get("adapter.kind") != "none",
-    "adapter.dropout": lambda c: c.get("adapter.kind") != "none",
-    "adapter.components": lambda c: c.get("adapter.kind") != "none",
-    "adapter.lokr_factor": lambda c: c.get("adapter.kind") == "lokr" or (c.get("adapter.kind") == "lycoris_lora" and c.get("adapter.lycoris_algo") in ("lokr",)),
-    "adapter.lokr_decompose_both": lambda c: c.get("adapter.kind") == "lokr" or (c.get("adapter.kind") == "lycoris_lora" and c.get("adapter.lycoris_algo") in ("lokr",)),
-
-    "train.compile_dynamic": lambda c: bool(c.get("train.compile")),
-    "train.compile_regional": lambda c: bool(c.get("train.compile")),
-    "train.pack_resolutions": lambda c: sys.platform != "win32" or c.get("train.attention_backend") == "flash_attn_2",
-    "train.moss_checkpoint_inside_compile": lambda c: (
-        c.get("train.model_family") in ("auto", "moss_image")
-        and bool(c.get("train.compile")) and bool(c.get("train.gradient_checkpointing"))),
-
-    "quant.text_encoder_weights_dtype": lambda c: bool(c.get("quant.quantize_text_encoder")),
-    "quant.weights_dtype": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
-    "quant.backend": lambda c: True,
-    "quant.mode": lambda c: True,
-    "quant.use_quantized_matmul": lambda c: c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none",
-    "quant.use_hadamard": lambda c: (c.get("quant.backend", "sdnq") == "sdnq"
-                                     and c.get("quant.mode") == "frozen"
-                                     and c.get("quant.use_quantized_matmul") is True),
-    "quant.skip_policy": lambda c: c.get("quant.mode") != "none",
-    "quant.extra_skip": lambda c: c.get("quant.mode") != "none",
-    "quant.group_size": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
-    "quant.dynamic_loss_threshold": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
-    "quant.use_stochastic_rounding": lambda c: c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") == "training",
-}
-
-
-def _has_texture_phase(c: dict) -> bool:
-    return any(p.get("mode") == "texture" for p in (c.get("curriculum") or []))
-
-
-# Derived from the schema rather than listed, so adding a texture key cannot leave it ungated --
-# which is exactly what happened when the oversize cascade added four of them at once.
-for _tex in (k for k in SPEC if k.startswith("dataset.texture.")):
-    _RULES[_tex] = lambda c: _has_texture_phase(c)
-
-
-def _adapter_targets(c: dict) -> set[str]:
-    t = set(c.get("adapter.components") or [])
-    return t
-
-
-for _comp in ("image_attn", "text_attn", "mlp", "adaln", "base"):
-    # Under an adapter, a per-component LR only reaches parameters that actually have one injected
-    # -- which is exactly what `load_config` rejects. Full FT can address every component.
-    _RULES[f"component_lr.{_comp}"] = (
-        lambda c, comp=_comp: c.get("adapter.kind") == "none" or comp in _adapter_targets(c)
-    )
-
-
-_RULES["component_lr.adaln"] = lambda c: c.get("adapter.kind") == "none"
+from ..ui_core.rules import _RULES, _has_texture_phase, _adapter_targets
 
 
 class TrainingGUI(QtWidgets.QWidget):
@@ -784,6 +652,8 @@ class TrainingGUI(QtWidgets.QWidget):
         self._last_adapter_selection = (flat.get("adapter.kind"), flat.get("adapter.lycoris_algo"))
         self._lock_quant_preset()
         self._lock_moss_sampling()
+        self._last_flow_selection = tuple(self.editors[k].get() for k in
+            ('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'))
         self._refresh()
 
     def collect(self) -> dict:
@@ -920,7 +790,7 @@ class TrainingGUI(QtWidgets.QWidget):
     def _lock_moss_sampling(self):
         if self.editors["flow.timestep_sample_method"].get() != "moss":
             return
-        locked = {"flow.sigmoid_scale": 1.0, "flow.shift": 1.0, "flow.flux_shift": False}
+        locked = {"flow.sigmoid_scale": 1.0, "flow.shift": 1.0, "flow.flux_shift": False, "flow.cabal_shift": False}
         changed = any(self.editors[key].get() != value for key, value in locked.items())
         self._applying = True
         try:
@@ -932,52 +802,31 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log("Kohaku MOSS sampling: locked sigmoid_scale=1, shift=1, flux_shift=false")
 
     def _on_edit(self):
-        if not self._applying:
-            enabled = self.editors['resolution_schedule.enabled'].get()
-            if enabled and not getattr(self, '_last_resolution_enabled', False):
-                self._applying = True
-                try:
-                    tiers = self.editors['dataset.resolutions'].get() or [512, 768, 1024]
-                    if not self.editors['resolution_schedule.stages'].get():
-                        shares = [.2, .2, .6] if len(tiers) == 3 else [round(100 / len(tiers), 4) / 100] * len(tiers)
-                        shares[-1] = 1 - sum(shares[:-1])
-                        self.editors['resolution_schedule.stages'].set([
-                            dict(resolution=t, share=w, lr_mul={512: .8, 768: .9}.get(t, 1.0))
-                            for t, w in zip(tiers, shares)])
-                    self.editors['dataset.resolutions'].set(tiers)
-                    batch = self.editors['train.batch_size'].get()
-                    if not isinstance(batch, dict):
-                        self.editors['train.batch_size'].set({t: batch for t in tiers})
-                    self.editors['train.pack_resolutions'].set(True)
-                    if self.editors['train.attention_backend'].get() == 'sdpa':
-                        self.editors['train.attention_backend'].set('flash_attn_2' if sys.platform == 'win32' else 'torch_varlen')
-                    if not self.editors['train.max_steps'].get():
-                        self.editors['train.max_steps'].set(560)
-                finally:
-                    self._applying = False
-            self._last_resolution_enabled = enabled
-            self._lock_quant_preset()
-            self._lock_moss_sampling()
-            kind = self.editors["optimizer.kind"].get()
-            if kind != getattr(self, "_last_optimizer_kind", kind) and kind in OPTIMIZERS:
-                self._applying = True
-                try:
-                    for key, value in optimizer_defaults(kind).items():
-                        self.editors[f"optimizer.{key}"].set(value)
-                finally:
-                    self._applying = False
-            self._last_optimizer_kind = kind
-            selection = (self.editors["adapter.kind"].get(), self.editors["adapter.lycoris_algo"].get())
-            if selection != getattr(self, "_last_adapter_selection", None) and selection[0] == "lycoris_lora":
-                self._applying = True
-                try:
-                    self.editors["train.compile"].set("default")
-                    self.editors["adapter.lycoris_bypass"].set(selection[1] not in ("dora",))
-                    self.editors["adapter.lycoris_wd_on_output"].set(True)
-                finally:
-                    self._applying = False
-            self._last_adapter_selection = selection
-            self._refresh()
+        if self._applying:
+            return
+        from ..ui_core.config import normalize
+        flat = self.collect()
+        previous = dict(flat)
+        previous['resolution_schedule.enabled'] = getattr(self, '_last_resolution_enabled', False)
+        previous['optimizer.kind'] = getattr(self, '_last_optimizer_kind', flat.get('optimizer.kind'))
+        previous['adapter.kind'], previous['adapter.lycoris_algo'] = getattr(self, '_last_adapter_selection', (None, None))
+        for key, value in zip(('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'),
+                             getattr(self, '_last_flow_selection', ('logit_normal', False, False))):
+            previous[key] = value
+        normalized = normalize(flat, previous)
+        self._applying = True
+        try:
+            for key, value in normalized.items():
+                if key in self.editors and value != flat.get(key):
+                    self.editors[key].set(value)
+        finally:
+            self._applying = False
+        self._last_resolution_enabled = bool(normalized.get('resolution_schedule.enabled'))
+        self._last_optimizer_kind = normalized.get('optimizer.kind')
+        self._last_adapter_selection = (normalized.get('adapter.kind'), normalized.get('adapter.lycoris_algo'))
+        self._last_flow_selection = tuple(normalized.get(k) for k in
+            ('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'))
+        self._refresh()
 
     def _use_windows_attention(self):
         self.editors["train.attention_backend"].set("sdpa")
@@ -988,12 +837,17 @@ class TrainingGUI(QtWidgets.QWidget):
     def _refresh(self):
         flat = self.collect()
         staged = bool(flat.get('resolution_schedule.enabled'))
+        epoch_mode = flat.get('resolution_schedule.unit') == 'epochs'
         for key in ('train.epochs', 'train.save_every_epochs'):
             for widget in self.rows.get(key, ()):
-                widget.setVisible(not staged)
+                widget.setVisible(not staged or epoch_mode)
+        for widget in self.rows.get('train.max_steps', ()):
+            widget.setVisible(not staged or not epoch_mode)
+        for widget in self.rows.get('dataset.num_repeats', ()):
+            widget.setVisible(flat.get('dataset.target_images') is None)
         self.editors['resolution_schedule.stages'].preview(
-            flat.get('train.max_steps'), flat.get('train.batch_size'), self.num_processes(),
-            flat.get('train.gradient_accumulation_steps', 1))
+            flat.get('train.epochs' if epoch_mode else 'train.max_steps'), flat.get('train.batch_size'), self.num_processes(),
+            flat.get('train.gradient_accumulation_steps', 1), flat.get('resolution_schedule.unit', 'steps'))
         windows = sys.platform == "win32"
         attention = self.editors["train.attention_backend"]
         item = attention.widget.model().item(attention.values.index("torch_varlen"))
@@ -1006,7 +860,7 @@ class TrainingGUI(QtWidgets.QWidget):
                 flat.get("train.pack_resolutions") and flat.get("train.attention_backend") != "flash_attn_2")))
         self.timestep_plot.set_config(flat)
         has_subsets = self.editors["dataset.subsets"].table.rowCount() > 0
-        for key in ("dataset.path", "dataset.num_repeats"):
+        for key in ("dataset.path", "dataset.num_repeats", 'dataset.target_images'):
             self.editors[key].set_enabled(not has_subsets)
             for widget in self.rows[key]:
                 widget.setEnabled(not has_subsets)
@@ -1028,6 +882,8 @@ class TrainingGUI(QtWidgets.QWidget):
                 continue
             try:
                 on = bool(rule(flat)) and key not in locked_quant
+                if key in ('dataset.num_repeats', 'dataset.target_images') and has_subsets:
+                    on = False
             except Exception:
                 on = True
             editor.set_enabled(on)

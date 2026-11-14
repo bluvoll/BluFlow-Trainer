@@ -6,7 +6,8 @@ from .dataset import BucketBatchSampler
 
 class NativeResolutionBatchSampler(BucketBatchSampler):
     def _batches(self):
-        indices = list(range(len(self.dataset)))
+        indices = (self.dataset.epoch_indices(self.epoch) if getattr(self.dataset, 'weighted', False)
+                   else list(range(len(self.dataset))))
         if self.shuffle:
             random.Random(self.seed + self.epoch).shuffle(indices)
         n = self._flat
@@ -17,7 +18,8 @@ class NativeResolutionBatchSampler(BucketBatchSampler):
         ]
 
     def __len__(self):
-        n = len(self.dataset)
+        n = (len(self.dataset.epoch_indices(self.epoch)) if getattr(self.dataset, 'weighted', False)
+             else len(self.dataset))
         return n // self._flat if self.drop_last else (n + self._flat - 1) // self._flat
 
 

@@ -12,6 +12,9 @@ global batch size either wastes VRAM at low resolution or OOMs at high.
 from __future__ import annotations
 
 import random
+import math
+import hashlib
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -67,14 +70,16 @@ class SubsetConfig:
     """
 
     path: str
-    num_repeats: int = 1
+    num_repeats: float = 1
     texture: bool = True
+    target_images: int | None = None
 
     def __post_init__(self):
-        if self.num_repeats < 1:
-            raise ValueError(
-                f"subset {self.path!r}: num_repeats must be >= 1, got {self.num_repeats}"
-            )
+        if (isinstance(self.num_repeats, bool) or not isinstance(self.num_repeats, (int, float))
+                or not math.isfinite(self.num_repeats) or self.num_repeats < 0):
+            raise ValueError('num_repeats must be finite and nonnegative')
+        if self.target_images is not None and (type(self.target_images) is not int or self.target_images < 0):
+            raise ValueError('target_images must be a nonnegative integer')
 
 
 @dataclass
@@ -101,7 +106,8 @@ class DatasetConfig:
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = True
     multires_training: bool = False
-    num_repeats: int = 1
+    num_repeats: float = 1
+    target_images: int | None = None
     caption: CaptionConfig = field(default_factory=CaptionConfig)
 
     # Train from cached latents alone, with the source images deleted. A sample is then
@@ -120,6 +126,7 @@ class DatasetConfig:
     texture: TextureConfig = field(default_factory=TextureConfig)
 
     def __post_init__(self):
+        SubsetConfig(self.path or '', self.num_repeats, target_images=self.target_images)
         if self.cache_validation not in ("warn", "strict", "off"):
             raise ValueError("dataset.cache_validation must be warn, strict or off")
         self.subsets = [
@@ -166,7 +173,8 @@ class DatasetConfig:
         """
         if self.subsets:
             return self.subsets
-        return [SubsetConfig(path=self.path, num_repeats=self.num_repeats, texture=True)]
+        return [SubsetConfig(path=self.path, num_repeats=self.num_repeats, texture=True,
+                             target_images=self.target_images)]
 
     @property
     def tiers(self) -> list[int]:
@@ -214,6 +222,7 @@ class ImageEntry:
     # False for entries from a `texture = false` subset: they stay fullres and keep their captions
     # even while the curriculum is in a texture phase. See `SubsetConfig`.
     texture_ok: bool = True
+    source_key: str = ''
 
 
 @dataclass
@@ -280,7 +289,14 @@ class MageFlowDataset(Dataset):
 
     def _scan(self) -> None:
         subsets = self.config.effective_subsets()
-        resolved = [(s, self._resolve_source(Path(s.path))) for s in subsets]
+        # Keep the legacy physical repeat layout (and checkpoint/cache identity) unchanged.
+        self.weighted = any(s.target_images is not None or s.num_repeats == 0
+                            or not float(s.num_repeats).is_integer() for s in subsets)
+        self.source_pools = []
+        resolved = [(s, self._resolve_source(Path(s.path))) for s in subsets
+                    if (s.target_images if s.target_images is not None else s.num_repeats) != 0]
+        if not resolved:
+            raise ValueError('Dataset weighting produces an empty dataset')
 
         # `auto` is resolved per directory, so two subsets can legitimately disagree -- but a batch
         # carries either `pixels` or `latents`, never both (`collate` picks one key), so a mixed
@@ -317,14 +333,50 @@ class MageFlowDataset(Dataset):
                     e.texture_ok = False
             # Per-subset repeats, applied to that subset's slice only. This is the knob that
             # balances a small regularization set against a large training set.
-            if sub.num_repeats > 1:
-                self.entries.extend(fresh * (sub.num_repeats - 1))
+            if self.weighted:
+                groups = {}
+                for i, e in enumerate(fresh, start):
+                    groups.setdefault(e.source_key, []).append(i)
+                self.source_pools.append((sub, groups))
+            elif sub.num_repeats > 1:
+                self.entries.extend(fresh * (int(sub.num_repeats) - 1))
             self.subset_report.append((sub, len(self.entries) - start))
             if self.tier_report is not None:
                 reports.append(self.tier_report)
 
         verify_max_resolution({e.bucket for e in self.entries})
         self.tier_report = _merge_tier_reports(reports)
+        selected = self.epoch_indices(0)
+        if not selected:
+            raise ValueError('Dataset weighting produces an empty dataset')
+        if self.weighted:
+            counts = Counter(selected)
+            self.subset_report = [(sub, sum(counts[i] for group in groups.values() for i in group))
+                                  for sub, groups in self.source_pools]
+
+    def epoch_indices(self, epoch, resolution=None):
+        """Immutable candidate indices; selection rotates before tier expansion and rank sharding."""
+        if not self.weighted:
+            return [i for i, e in enumerate(self.entries)
+                    if resolution is None or e.resolution == resolution]
+        result = []
+        for sub, groups in self.source_pools:
+            sources = list(groups)
+            n = len(sources)
+            if not n:
+                continue
+            if sub.target_images is not None:
+                whole, extra = divmod(sub.target_images, n)
+            else:
+                whole = math.floor(sub.num_repeats)
+                extra = round((sub.num_repeats - whole) * n)
+            key = f'{self.caption_seed}:{Path(sub.path).resolve()}:{epoch}'.encode()
+            remainder = sources.copy()
+            random.Random(int.from_bytes(hashlib.sha256(key).digest(), 'big')).shuffle(remainder)
+            for source in sources * whole + remainder[:extra]:
+                result.extend(i for i in groups[source]
+                              if resolution is None or self.entries[i].resolution == resolution)
+        return result
 
     def _resolve_source(self, root: Path) -> str:
         if not root.exists():
@@ -423,6 +475,7 @@ class MageFlowDataset(Dataset):
                     ImageEntry(
                         path=p,  # the cache file itself; there may be no image any more
                         latent_path=p, bucket=bucket, tags=tags, nl=nl, resolution=tier,
+                        source_key=stem,
                     )
                 )
 
@@ -574,6 +627,7 @@ class MageFlowDataset(Dataset):
                     ImageEntry(
                         path=p, latent_path=cache_path(p, bucket), bucket=bucket,
                         tags=tags, nl=nl, resolution=tier, source_size=(w, h),
+                        source_key=p.stem,
                     )
                 )
 
@@ -597,24 +651,25 @@ class MageFlowDataset(Dataset):
     def __len__(self) -> int:
         return len(self.entries)
 
-    def __getitem__(self, index: int | tuple[int, int]) -> dict:
+    def __getitem__(self, index: int | tuple) -> dict:
         # The sampler yields (index, epoch) so the caption RNG can be seeded from the sample
         # itself. Deriving it from global `random` would be wrong twice over: forked DataLoader
         # workers inherit the parent's RNG state, and every DDP rank forks from the same seed --
         # so ranks would draw *identical* tag shuffles and dropouts. That silently collapses
         # caption diversity instead of failing, which is why it is seeded explicitly here.
-        phase = canvas = None
+        phase = canvas = occurrence = None
         if isinstance(index, tuple):
-            index, epoch, phase, canvas = (index + (None, None))[:4]
+            index, epoch, phase, canvas, occurrence = (index + (None,) * 4)[:5]
         else:
             index, epoch = index, 0
         e = self.entries[index]
-        rng = random.Random(_mix(self.caption_seed, epoch, index))
+        rng = random.Random(_mix(self.caption_seed, epoch, index) if occurrence is None
+                            else _mix(self.caption_seed, epoch, index, occurrence))
 
         if canvas is not None:
             return self._texture_sample(e, canvas, rng)
 
-        caption = (self.caption_variation_cache.caption(index, epoch)
+        caption = (self.caption_variation_cache.caption(index, epoch, occurrence)
                    if hasattr(self, "caption_variation_cache")
                    else build_caption(e.tags, e.nl, self.config.caption, rng))
         sample = {"caption": caption, "bucket": e.bucket, "path": str(e.path)}
@@ -771,7 +826,13 @@ class BucketBatchSampler(Sampler[list[int]]):
         # batch that mixed a texture-eligible entry with an exempt one could not honour both -- the
         # exempt entry would either be cropped anyway or force the whole batch to fullres. Splitting
         # here makes the guarantee structural: `__iter__` can read the flag off any member.
-        for (bucket, _), indices in self._groups.items():
+        groups = self._groups
+        if getattr(self.dataset, 'weighted', False):
+            groups = {}
+            for i in self.dataset.epoch_indices(self.epoch):
+                e = self.dataset.entries[i]
+                groups.setdefault((e.bucket, e.texture_ok), []).append(i)
+        for (bucket, _), indices in groups.items():
             indices = list(indices)
             if self.shuffle:
                 rng.shuffle(indices)
@@ -818,7 +879,9 @@ class BucketBatchSampler(Sampler[list[int]]):
     def _phase_for(self, batch_ordinal: int) -> object | None:
         if not getattr(self, "curriculum", None):
             return None
-        step = (self.epoch * self.curriculum_steps_per_epoch
+        step = (self.epoch_step_offsets[self.epoch] if hasattr(self, 'epoch_step_offsets')
+                else self.epoch * self.curriculum_steps_per_epoch)
+        step = (step
                 + batch_ordinal // self.curriculum_batches_per_step)
         return self.curriculum.resolve(step / self.curriculum_total_steps)
 
@@ -828,6 +891,7 @@ class BucketBatchSampler(Sampler[list[int]]):
         # batch is the same shape. The canvas is drawn *here*, once per batch, for that reason --
         # drawing it per sample would produce a batch that cannot be stacked.
         rng = random.Random(self.seed + self.epoch)
+        visits = {}
         for ordinal, batch in enumerate(self._batches()):
             phase = self._phase_for(ordinal)
             canvas = None
@@ -837,7 +901,15 @@ class BucketBatchSampler(Sampler[list[int]]):
             if (phase is not None and getattr(phase, "mode", "fullres") == "texture"
                     and self.dataset.entries[batch[0]].texture_ok):
                 canvas = self._choose_canvas(batch, rng)
-            yield [(i, self.epoch, phase, canvas) for i in batch]
+            if getattr(self.dataset, 'weighted', False):
+                samples = []
+                for i in batch:
+                    occurrence = visits.get(i, 0)
+                    visits[i] = occurrence + 1
+                    samples.append((i, self.epoch, phase, canvas, occurrence))
+                yield samples
+            else:
+                yield [(i, self.epoch, phase, canvas) for i in batch]
 
     def _choose_canvas(self, batch: list[int], rng: random.Random) -> tuple[int, int]:
         """Pick the batch's canvas -- from those every image in it can hold, when possible.

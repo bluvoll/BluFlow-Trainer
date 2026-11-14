@@ -166,6 +166,40 @@ class OptIntEditor(_Blockable):
         self.widget.setText("" if value is None else str(int(value)))
 
 
+class ImageTargetEditor(_Blockable):
+    """None selects repeats; an integer selects an exact image target."""
+    def __init__(self):
+        box = QtWidgets.QWidget()
+        super().__init__(box)
+        layout = QtWidgets.QHBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.toggle = QtWidgets.QCheckBox('Target images')
+        self.toggle.setAccessibleName('Use target images')
+        self.count = NoScrollSpinBox()
+        self.count.setLocale(QtCore.QLocale.c())
+        self.count.setRange(0, 2_147_483_647)
+        self.count.setValue(1)
+        self.count.setAccessibleName('Target image count')
+        layout.addWidget(self.toggle)
+        layout.addWidget(self.count)
+        self.toggle.toggled.connect(self._toggle)
+        self.count.valueChanged.connect(self._emit)
+        self._toggle(False)
+
+    def _toggle(self, enabled):
+        self.count.setVisible(enabled)
+        self._emit()
+
+    def get(self):
+        return self.count.value() if self.toggle.isChecked() else None
+
+    def _set(self, value):
+        if value is not None:
+            self.count.setValue(value)
+        self.toggle.setChecked(value is not None)
+        self.count.setVisible(value is not None)
+
+
 class FloatEditor(_Blockable):
     """Locale is pinned per widget, not globally. A spin box formats through the *widget's* locale,
     which Qt inherits from QApplication at construction -- so on a Spanish desktop the form shows
@@ -182,10 +216,20 @@ class FloatEditor(_Blockable):
         w.valueChanged.connect(self._emit)
 
     def get(self):
-        return float(self.widget.value())
+        current = float(self.widget.value())
+        # Display precision must not change an untouched TOML value (e.g. 1/9).
+        if current == getattr(self, '_rendered_value', None):
+            return self._original_value
+        return current
 
     def _set(self, value):
-        self.widget.setValue(float(value or 0.0))
+        original = float(value or 0.0)
+        self.widget.setValue(original)
+        self._rendered_value = float(self.widget.value())
+        self._original_value = (
+            original if self.widget.minimum() <= original <= self.widget.maximum()
+            else self._rendered_value
+        )
 
 
 class SciEditor(_Blockable):
@@ -737,24 +781,14 @@ class CurriculumEditor(_Blockable):
 # conversion is enforced rather than guessed.
 # `lr_mul` is omitted throughout: the reference does not vary it across these phases, and 1.0 is an
 # exact no-op, so writing it would be nine lines of noise in the saved TOML.
-TRAINTRAIN_CURRICULUM = [
-    {"at": 0.00, "t_range": [0.0, 1.0], "mode": "fullres"},
-    {"at": 0.10, "t_range": [0.0, 1.0], "mode": "texture"},
-    {"at": 0.15, "t_range": [0.0, 0.6], "mode": "texture"},
-    {"at": 0.40, "t_range": [0.0, 1.0], "mode": "texture"},
-    {"at": 0.45, "t_range": [0.0, 0.6], "mode": "texture"},
-    {"at": 0.60, "t_range": [0.0, 1.0], "mode": "texture"},
-    {"at": 0.65, "t_range": [0.0, 0.6], "mode": "texture"},
-    {"at": 0.80, "t_range": [0.0, 1.0], "mode": "texture"},
-    {"at": 0.85, "t_range": [0.0, 0.6], "mode": "texture"},
-]
+from ..ui_core.presets import TRAINTRAIN_CURRICULUM
 
 
 class SubsetEditor(_Blockable):
     """`[[dataset.subsets]]` -- the second array-of-tables key, and the same shape as
     `CurriculumEditor`: a grid with add/remove rather than one dotted key per value.
 
-    Three columns because three things vary per source directory. `num_repeats` is the weighting
+    Each source has a repeat multiplier or an integer image target. `num_repeats` is the weighting
     knob -- a 61-image regularization set against 413 training images is 13% of the epoch at x1 and
     23% at x2 -- and `texture` is the one that changes semantics rather than proportions: an
     unchecked box keeps that subset in fullres for the whole run, captions intact, whatever the
@@ -773,7 +807,7 @@ class SubsetEditor(_Blockable):
     back an error about a key the user cannot see.
     """
 
-    _HEADERS = ("Folder", "Repeats", "Texture crops")
+    _HEADERS = ("Folder", "Repeats", "Texture crops", "Image target")
 
     def __init__(self):
         w = QtWidgets.QWidget()
@@ -783,7 +817,7 @@ class SubsetEditor(_Blockable):
 
         hint = make_label(
             "Add rows to use these folders instead of the single Dataset path above. "
-            "Remove all rows to restore the single folder. Each row has its own repeat count. "
+            "Remove all rows to restore the single folder. Each row has fractional repeats or an image target. "
             "Click a row number to select it, then Remove selected. Ctrl/Shift selects multiple rows."
         )
         hint.setWordWrap(True)
@@ -799,10 +833,11 @@ class SubsetEditor(_Blockable):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         head = self.table.horizontalHeader()
         head.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        for i in (1, 2):
+        for i in (1, 2, 3):
             head.setSectionResizeMode(i, QtWidgets.QHeaderView.ResizeMode.Fixed)
         head.resizeSection(1, 110)
         head.resizeSection(2, max(130, self.table.fontMetrics().horizontalAdvance("Texture crops") + 28))
+        head.resizeSection(3, 240)
         self.table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.table.setMinimumHeight(110)
         lay.addWidget(self.table)
@@ -824,7 +859,7 @@ class SubsetEditor(_Blockable):
         self.clear_btn.clicked.connect(self._clear)
         self.table.itemSelectionChanged.connect(self._update_remove_button)
 
-    def _make_row(self, path, num_repeats, texture, index):
+    def _make_row(self, path, num_repeats, texture, index, target_images=None):
         # A plain QLineEdit + button rather than a nested PathEditor. PathEditor is a QObject
         # wrapper around its widget; putting only the widget in a table cell leaves the wrapper
         # unreferenced, Python collects it, and Qt then owns a half-destroyed object -- which
@@ -848,10 +883,12 @@ class SubsetEditor(_Blockable):
                 line.setText(chosen)
         browse.clicked.connect(_pick)
 
-        reps = NoScrollSpinBox()
+        reps = NoScrollDoubleSpinBox()
         reps.setLocale(QtCore.QLocale.c())
-        reps.setRange(1, 1000)
-        reps.setValue(int(num_repeats))
+        reps.setRange(0, 1_000_000)
+        reps.setDecimals(8)
+        reps.setSingleStep(0.05)
+        reps.setValue(float(num_repeats))
         reps.setMinimumWidth(100)
         self.table.horizontalHeader().resizeSection(1, max(110, reps.sizeHint().width() + 12))
         tex = QtWidgets.QCheckBox()
@@ -872,6 +909,13 @@ class SubsetEditor(_Blockable):
         self.table.setCellWidget(index, 0, holder_path)
         self.table.setCellWidget(index, 1, reps)
         self.table.setCellWidget(index, 2, holder)
+        target = ImageTargetEditor()
+        target.set(target_images)
+        # Keep the QObject editor alive for as long as its table cell exists.
+        target.widget.editor = target
+        self.table.setCellWidget(index, 3, target.widget)
+        reps.setEnabled(target_images is None)
+        target.changed.connect(lambda: (reps.setEnabled(target.get() is None), self._emit()))
         self.table.setRowHeight(index, max(40, line.sizeHint().height() + 8,
                                            reps.sizeHint().height() + 8,
                                            browse.sizeHint().height() + 8))
@@ -912,11 +956,14 @@ class SubsetEditor(_Blockable):
         line = self.table.cellWidget(i, 0).findChild(QtWidgets.QLineEdit)
         reps = self.table.cellWidget(i, 1)
         tex = self.table.cellWidget(i, 2).findChild(QtWidgets.QCheckBox)
+        target = self.table.cellWidget(i, 3).editor.get()
         row = {"path": line.text().strip()}
         # Same reasoning as CurriculumEditor's `lr_mul`: `prune_defaults` cannot reach inside an
         # array of tables, so writing exact defaults would put noise in every row.
-        if reps.value() != 1:
-            row["num_repeats"] = int(reps.value())
+        if target is not None:
+            row['target_images'] = target
+        elif reps.value() != 1:
+            row["num_repeats"] = reps.value()
         if not tex.isChecked():
             row["texture"] = False
         return row
@@ -932,7 +979,7 @@ class SubsetEditor(_Blockable):
             i = self.table.rowCount()
             self.table.insertRow(i)
             self._make_row(sub.get("path", ""), sub.get("num_repeats", 1),
-                           sub.get("texture", True), i)
+                           sub.get("texture", True), i, sub.get('target_images'))
 
 
 class BlockLRRangesEditor(_Blockable):
@@ -1059,11 +1106,12 @@ class ResolutionStagesEditor(_Blockable):
                      lr_mul=self.table.cellWidget(r, 2).value() / 100)
                 for r in range(self.table.rowCount())]
 
-    def preview(self, total, batches, world, accumulation):
+    def preview(self, total, batches, world, accumulation, unit='steps'):
         from ..training.resolution_schedule import ResolutionSchedule
         try:
             stages = self.get()
-            budgets = ResolutionSchedule(enabled=True, stages=stages).budgets(total)
+            budgets = ResolutionSchedule(enabled=True, stages=stages, unit=unit).budgets(total)
+            self.table.horizontalHeaderItem(4).setText('Epochs' if unit == 'epochs' else 'Updates')
             if not isinstance(batches, dict):
                 raise ValueError('Use a per-tier batch size map in Batching')
             for row, (stage, budget) in enumerate(zip(stages, budgets)):
@@ -1074,7 +1122,8 @@ class ResolutionStagesEditor(_Blockable):
                     item = QtWidgets.QTableWidgetItem(str(value))
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
                     self.table.setItem(row, col, item)
-            self.summary.setText(f'{total} successful updates; skipped attempts do not consume the budget. Epoch settings are unavailable.')
+            self.summary.setText(f'{total} dataset epochs; skipped updates do not extend a stage.' if unit == 'epochs'
+                                 else f'{total} successful updates; skipped attempts do not consume the budget.')
         except (ValueError, TypeError) as exc:
             for row in range(self.table.rowCount()):
                 for col in range(3, 6):
