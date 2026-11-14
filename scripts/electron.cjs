@@ -56,6 +56,33 @@ function installRuntime() {
     ui,
   );
 }
+function buildCurrent() {
+  try {
+    return (
+      fs.existsSync(path.join(ui, "dist/index.html")) &&
+      JSON.parse(
+        fs.readFileSync(path.join(ui, "dist/build-stamp.json"), "utf8"),
+      ).fingerprint ===
+        require("../electron-ui/scripts/stamp.cjs").fingerprint()
+    );
+  } catch (error) {
+    if (error.code === "ENOENT" || error instanceof SyntaxError) return false;
+    throw error;
+  }
+}
+function runtimeReady() {
+  const runtimePath = path.join(ui, "node_modules/electron/path.txt");
+  return (
+    fs.existsSync(runtimePath) &&
+    fs.existsSync(
+      path.join(
+        ui,
+        "node_modules/electron/dist",
+        fs.readFileSync(runtimePath, "utf8").trim(),
+      ),
+    )
+  );
+}
 try {
   const [action, ...args] = process.argv.slice(2);
   if (action === "setup") {
@@ -66,30 +93,15 @@ try {
     throw Error("Usage: node scripts/electron.cjs setup|start [GUI options]");
   if (!fs.existsSync(python))
     throw Error("Run the trainer installer first, then setup-electron.");
-  const stamp = path.join(ui, "dist/build-stamp.json");
-  if (
-    !fs.existsSync(stamp) ||
-    JSON.parse(fs.readFileSync(stamp, "utf8")).fingerprint !==
-      require("../electron-ui/scripts/stamp.cjs").fingerprint()
-  )
-    throw Error(
-      "Electron UI is missing or out of date. Run setup-electron" +
-        (process.platform === "win32" ? ".bat" : ".sh") +
-        ".",
+  if (!buildCurrent() || !runtimeReady()) {
+    console.log(
+      "Electron UI is missing or out of date. Preparing it automatically…",
     );
+    setup();
+  }
   let restarts = 0;
   while (true) {
-    const runtimePath = path.join(ui, "node_modules/electron/path.txt");
-    if (
-      !fs.existsSync(runtimePath) ||
-      !fs.existsSync(
-        path.join(
-          ui,
-          "node_modules/electron/dist",
-          fs.readFileSync(runtimePath, "utf8").trim(),
-        ),
-      )
-    )
+    if (!runtimeReady())
       throw Error("Electron runtime is missing. Run setup-electron first.");
     const electron = require(path.join(ui, "node_modules/electron"));
     const electronEnv = { ...process.env, BLUFLOW_PYTHON: python };

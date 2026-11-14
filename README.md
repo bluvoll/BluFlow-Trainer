@@ -37,10 +37,29 @@ git clone https://github.com/bluvoll/BluFlow-Trainer.git
 cd BluFlow-Trainer
 ```
 
-| Platform | Install | Launch GUI |
+| Platform | Install trainer | Launch PySide GUI |
 |---|---|---|
 | Linux | `./install.sh` | `./start-gui.sh` |
 | Windows | `install.bat` | `start-gui.bat` |
+
+**Both GUIs are supported.** The new Electron GUI provides a dockable workspace;
+the existing PySide GUI remains available. Both use the same training backend,
+TOMLs, and training settings. The trainer installer creates the PySide launcher.
+
+To use **Electron**, install the trainer above and **Node.js 22.12 or newer with
+npm**, then run the setup and launch scripts for your platform:
+
+| Platform | Set up / rebuild Electron | Launch Electron GUI |
+|---|---|---|
+| Linux | `bash setup-electron.sh` | `bash start-electron.sh` |
+| Windows | `setup-electron.bat` | `start-electron.bat` |
+
+Electron setup reuses the trainer's `venv/` and installs/builds the desktop UI.
+Setup can be run explicitly; the launch script also prepares a missing or outdated
+UI automatically, including after a manual Git pull. A current build starts without
+reinstalling Node packages. Both Linux launch scripts enable PyTorch expandable
+memory segments for training. See the [Electron UI guide](docs/electron-ui.md)
+for workspace controls, configuration-folder options, and troubleshooting.
 
 The installers create `venv/`. The tested stack uses **PyTorch 2.10.0 + CUDA 12.8**;
 pinned packages and Git revisions are recorded in `uv.lock` and `requirements.txt`.
@@ -51,12 +70,7 @@ older optimizer states, and a remaining upstream Kahan/weight-decay interaction.
 Kahan stays optional and off by default; better update precision does not guarantee
 better visual results. Native Windows validation below was performed on 0.2.4.
 
-To launch from an already configured environment, use `python -m trainer.gui`.
-An optional Electron desktop provides the same training workflows in a dockable
-workspace. After the trainer is installed, run `setup-electron.bat` then
-`start-electron.bat` on Windows, or `bash setup-electron.sh` then
-`bash start-electron.sh` on Linux. Requires Node.js 22.12 or newer.
-See the [Electron UI guide](docs/electron-ui.md) for setup, features, and verification.
+To launch PySide from an already configured environment, use `python -m trainer.gui`.
 
 Run CLI commands below with that environment activated, or substitute its Python
 executable (`venv/bin/python` on Linux, `venv\Scripts\python.exe` on Windows).

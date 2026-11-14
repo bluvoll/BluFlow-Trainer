@@ -19,9 +19,11 @@ Install **Node.js 22.12 or newer**, including npm, then use:
 | Linux | `bash setup-electron.sh` | `bash start-electron.sh` |
 
 Setup checks the Python backend, installs the locked Node dependencies with
-`npm ci`, and builds the local renderer. Repeat setup after pulling UI changes.
-The launcher checks the build fingerprint and explains when a rebuild is needed.
-No development server is required.
+`npm ci`, and builds the local renderer. The launcher checks the build fingerprint
+and automatically runs setup when the UI is missing or outdated, including after
+a manual Git pull, or when the Electron runtime is missing. Current builds launch
+without reinstalling Node packages. If preparation fails, startup stops and reports
+the error. No development server is required.
 
 For an existing alternative Python environment, set `BLUFLOW_PYTHON` to its
 Python executable before running either script. It must already contain the
@@ -127,7 +129,8 @@ process execution remain in Electron/Python.
 
 - **Missing trainer environment:** run the existing installer, or point
   `BLUFLOW_PYTHON` at the configured trainer interpreter.
-- **Missing or stale UI build:** run the platform's Electron setup script.
+- **Automatic UI preparation fails:** check the terminal error, Node.js version,
+  and network connection, then retry the launcher or run the Electron setup script.
 - **Backend stopped:** inspect the terminal output, correct the Python environment,
   and relaunch. Pending UI operations report the failure instead of hanging.
 - **Unusable saved layout:** use Panels → Reset workspace layout. If the app cannot
