@@ -9,6 +9,7 @@ on:
         "trainer/electron_backend/**",
         "trainer/tools/**",
         "tests/**",
+        "requirements-ci.txt",
         "scripts/electron.cjs",
         "*-electron.*",
         ".github/workflows/electron-ui.yml",
@@ -22,6 +23,7 @@ on:
         "trainer/electron_backend/**",
         "trainer/tools/**",
         "tests/**",
+        "requirements-ci.txt",
         "scripts/electron.cjs",
         "*-electron.*",
         ".github/workflows/electron-ui.yml",
@@ -50,12 +52,14 @@ jobs:
       - name: CPU dependencies for desktop contracts
         run: |
           python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install pytest numpy pillow toml safetensors einops loguru PySide6 packaging
+          python -m pip install -r requirements-ci.txt
       - run: npm --prefix electron-ui ci
       - run: node electron-ui/node_modules/electron/install.js
       - name: Linux desktop libraries
         if: runner.os == 'Linux'
-        run: node electron-ui/node_modules/playwright/cli.js install-deps chromium
+        run: |
+          node electron-ui/node_modules/playwright/cli.js install-deps chromium
+          sudo apt-get install -y libegl1 libopengl0
       - run: python -m trainer.electron_backend --check
       - name: Backend and existing GUI contracts
         shell: bash
