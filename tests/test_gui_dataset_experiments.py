@@ -110,8 +110,10 @@ def test_windows_blocks_packing_and_varlen_with_explicit_repair(gui, monkeypatch
     from types import SimpleNamespace
     from trainer.gui import app as gui_module
     from trainer.tools import windows_toolchain
+    from trainer.ui_core import rules
     monkeypatch.setattr(gui_module, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(windows_toolchain, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(rules, "sys", SimpleNamespace(platform="win32"))
     gui._apply(bridge.defaults() | {
         "dataset.path": "/images", "train.model_family": "moss_image",
         "train.attention_backend": "torch_varlen", "train.pack_resolutions": True,
@@ -134,8 +136,10 @@ def test_windows_moss_external_flash_enables_packing(gui, monkeypatch):
     from types import SimpleNamespace
     from trainer.gui import app as gui_module
     from trainer.tools import windows_toolchain
+    from trainer.ui_core import rules
     monkeypatch.setattr(gui_module, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(windows_toolchain, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(rules, "sys", SimpleNamespace(platform="win32"))
     gui._apply(bridge.defaults() | {
         "dataset.path": "/images", "train.model_family": "moss_image",
         "train.attention_backend": "flash_attn_2", "train.pack_resolutions": True,

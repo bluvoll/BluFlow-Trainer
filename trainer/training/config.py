@@ -574,6 +574,8 @@ def load_config(path: str | Path) -> Config:
     validate_model_options(cfg)
     if not cfg.dataset.path and not cfg.dataset.subsets:
         raise ValueError("dataset.path (or a [[dataset.subsets]] list) is required")
+    if not cfg.dataset.active_subsets():
+        raise ValueError('Dataset weighting produces an empty dataset')
 
     # A per-tier `batch_size` map must name exactly the tiers that exist. Checked here because it
     # is the one rule that spans two sections, and because getting it wrong is expensive: the old

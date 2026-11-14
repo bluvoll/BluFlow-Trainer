@@ -15,6 +15,16 @@ from torch.nn.utils.rnn import pad_sequence
 from .caption import build_caption
 
 
+def caption_cache_path(cfg):
+    """Keep explicit destinations; default to the first source used by training."""
+    if cfg.train.caption_cache_path:
+        return cfg.train.caption_cache_path
+    subsets = cfg.dataset.active_subsets()
+    if not subsets:
+        raise ValueError('Dataset weighting produces an empty dataset')
+    return str(Path(subsets[0].path) / "cached_text_embeddings" / "caption_variations.sqlite")
+
+
 def digest(value):
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, default=lambda x: sorted(x)).encode()

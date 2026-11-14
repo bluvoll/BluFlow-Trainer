@@ -248,7 +248,7 @@ SPEC: dict[str, Spec] = {
     ),
     "train.caption_cache_path": _spec(
         "Caption cache database",
-        "SQLite path. Empty uses cached_text_embeddings/caption_variations.sqlite inside the first dataset folder. One database covers all subsets and is reused across runs; stores embeddings on disk, not all in RAM.",
+        "SQLite path. Empty uses cached_text_embeddings/caption_variations.sqlite inside the first active dataset folder. One database covers all subsets and is reused across runs; stores embeddings on disk, not all in RAM.",
         lambda: F.PathEditor("file"),
     ),
     "train.cache_text_embeddings": _spec(

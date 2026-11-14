@@ -40,7 +40,10 @@ def config_cache_commands(args):
     from ..training.config import load_config
     cfg = load_config(args.config)
     commands = []
-    for subset in cfg.dataset.effective_subsets():
+    subsets = cfg.dataset.active_subsets()
+    if not subsets:
+        raise ValueError('Dataset weighting produces an empty dataset')
+    for subset in subsets:
         command = [sys.executable, "-u", "-m", "trainer.tools.cache_latents", "cache", subset.path,
                    "--model-path", cfg.train.model_path, "--model-family", cfg.train.model_family,
                    "--resolution", *map(str, args.resolution or cfg.dataset.tiers),

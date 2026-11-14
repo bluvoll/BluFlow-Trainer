@@ -81,6 +81,11 @@ class SubsetConfig:
         if self.target_images is not None and (type(self.target_images) is not int or self.target_images < 0):
             raise ValueError('target_images must be a nonnegative integer')
 
+    @property
+    def active(self) -> bool:
+        """An explicit target overrides repeats, including a target of zero."""
+        return (self.target_images if self.target_images is not None else self.num_repeats) > 0
+
 
 @dataclass
 class DatasetConfig:
@@ -175,6 +180,10 @@ class DatasetConfig:
             return self.subsets
         return [SubsetConfig(path=self.path, num_repeats=self.num_repeats, texture=True,
                              target_images=self.target_images)]
+
+    def active_subsets(self) -> list[SubsetConfig]:
+        """Sources to visit on disk; keep disabled rows in effective_subsets for identity."""
+        return [subset for subset in self.effective_subsets() if subset.active]
 
     @property
     def tiers(self) -> list[int]:
@@ -293,8 +302,7 @@ class MageFlowDataset(Dataset):
         self.weighted = any(s.target_images is not None or s.num_repeats == 0
                             or not float(s.num_repeats).is_integer() for s in subsets)
         self.source_pools = []
-        resolved = [(s, self._resolve_source(Path(s.path))) for s in subsets
-                    if (s.target_images if s.target_images is not None else s.num_repeats) != 0]
+        resolved = [(s, self._resolve_source(Path(s.path))) for s in self.config.active_subsets()]
         if not resolved:
             raise ValueError('Dataset weighting produces an empty dataset')
 

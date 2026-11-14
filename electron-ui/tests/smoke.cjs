@@ -15,6 +15,16 @@ fs.writeFileSync(
   `[train]\nmodel_family="moss_image"\nmodel_path="unused-model"\nrun_name="electron-smoke"\noutput_dir="${profile.replaceAll('\\', '/')}/output"\n[dataset]\npath="${profile.replaceAll('\\', '/')}/images"\n[adapter]\nkind="lora"\n`,
 );
 fs.mkdirSync(path.join(profile, 'images'));
+const curriculumRecipe =
+  `[train]\nmodel_family="moss_image"\nmodel_path="unused-model"\nrun_name="curriculum-test"\n` +
+  `[dataset]\npath="${profile.replaceAll('\\', '/')}/images"\nsource="encode"\n[adapter]\nkind="lora"\n`;
+fs.writeFileSync(path.join(configs, 'curriculum-empty.toml'), curriculumRecipe);
+fs.writeFileSync(
+  path.join(configs, 'curriculum-phases.toml'),
+  curriculumRecipe +
+    '[[curriculum]]\nat=0.0\nt_range=[0.0,1.0]\nmode="fullres"\nlr_mul=1.0\n' +
+    '[[curriculum]]\nat=0.5\nt_range=[0.0,0.2]\nmode="texture"\nlr_mul=0.4\n',
+);
 const python =
   process.env.BLUFLOW_PYTHON ||
   path.join(root, 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
@@ -75,6 +85,13 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.getByTestId('app').waitFor({ timeout: 60000 });
+  // Keep stage/batch expectations independent of the host's detected GPU count.
+  // This selects a fixture setting only; the smoke test never starts GPU work.
+  await page.evaluate(async () => {
+    const state = await window.bluflow.request('state');
+    await window.bluflow.request('gpus.set', { selected: [state.gpus[0].index] });
+  });
+  await page.getByLabel('Configuration preset').selectOption(path.join(configs, 'smoke.toml'));
   await page.locator('[data-field="train.run_name"] input').waitFor();
   await page.screenshot({ path: path.join(artifacts, 'workspace.png') });
   const fields = await page.evaluate(
@@ -117,6 +134,66 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   );
   await page.getByRole('button', { name: /Dataset.*sections/ }).click();
   await page.locator('[data-field="dataset.subsets"]').waitFor();
+  const curriculum = page.locator('[data-field="curriculum"]');
+  const curriculumToggle = curriculum.getByRole('checkbox', { name: 'Enable curriculum' });
+  const openFixture = async (filename) => {
+    const target = path.join(configs, filename);
+    await page.getByLabel('Configuration preset').selectOption(target);
+    await page.waitForFunction(
+      async (target) => (await window.bluflow.request('state')).path === target,
+      target,
+    );
+  };
+  await openFixture('curriculum-phases.toml');
+  await curriculumToggle.uncheck();
+  await page.waitForFunction(
+    async () => !(await window.bluflow.request('state')).flat.curriculum.length,
+  );
+  // Navigation may unmount the table, but must retain the current file's draft.
+  await page.getByRole('button', { name: /^Training.*sections/ }).click();
+  await page.getByRole('button', { name: /Dataset.*sections/ }).click();
+  assert.equal(await curriculum.locator('tbody tr').count(), 2);
+  await curriculumToggle.check();
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat.curriculum?.[1]?.lr_mul === 0.4,
+  );
+  await curriculumToggle.uncheck();
+  await openFixture('curriculum-empty.toml');
+  assert.equal(
+    await curriculum.locator('tbody tr').count(),
+    0,
+    'Opening another file discards the previous curriculum draft',
+  );
+  await curriculumToggle.check();
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat.curriculum?.length === 1,
+  );
+  await curriculum.getByRole('button', { name: 'Add phase', exact: true }).click();
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat.curriculum?.length === 2,
+  );
+  await curriculumToggle.uncheck();
+  await page.getByRole('button', { name: 'Reload', exact: true }).click();
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-field="curriculum"] tbody tr').length === 0,
+  );
+  await curriculumToggle.check();
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat.curriculum?.length === 1,
+  );
+  assert.equal(
+    await curriculum.locator('tbody tr').count(),
+    1,
+    'Reloading the same path also discards unsaved curriculum drafts',
+  );
+  await openFixture('curriculum-phases.toml');
+  assert.equal(
+    await curriculum.locator('tbody tr').count(),
+    2,
+    'Reopening restores the saved schedule',
+  );
+  await openFixture('electron-smoke-edited.toml');
+  assert.equal(await curriculum.locator('tbody tr').count(), 0);
   const targetSwitch = page.getByRole('switch', {
     name: 'Image weighting: use target images',
     exact: true,
@@ -493,6 +570,10 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
     });
   }, metrics);
   await page.getByTestId('elapsed').getByText('00:02:24', { exact: true }).waitFor();
+  const summary = page.getByRole('region', { name: 'Run summary' });
+  await summary.waitFor({ state: 'visible' });
+  assert.match(await summary.innerText(), /mode  MOSS LoRA/);
+  assert.match(await summary.innerText(), /dataset  80 cached samples/);
   const memoryChart = page.getByRole('img', {
     name: 'Peak allocated VRAM · GiB chart',
     exact: true,
@@ -523,11 +604,36 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
         .zoomed === 'false',
   );
   await page.screenshot({ path: path.join(artifacts, 'metrics.png') });
-  await app.evaluate(
+  const snapshotSummary = await app.evaluate(
     async ({ app }, { metrics, target }) => {
+      const inspected = new Promise((resolve, reject) => {
+        app.once('browser-window-created', (_event, window) => {
+          window.webContents.once('did-finish-load', () => {
+            window.webContents
+              .executeJavaScript(
+                `new Promise(resolve => {
+              const inspect = () => {
+                const summary = document.querySelector('.snapshot-metrics .metrics-summary');
+                if (!summary) return requestAnimationFrame(inspect);
+                resolve({text: summary.textContent, bottom: summary.getBoundingClientRect().bottom, height: innerHeight});
+              };
+              inspect();
+            })`,
+              )
+              .then(resolve, reject);
+          });
+        });
+      });
       await app.__bluflowCaptureMetrics({ metrics, path: target });
+      return await inspected;
     },
     { metrics, target: path.join(profile, 'metrics-final.png') },
+  );
+  assert.match(snapshotSummary.text, /mode  MOSS LoRA/);
+  assert.match(snapshotSummary.text, /dataset  80 cached samples/);
+  assert.ok(
+    snapshotSummary.bottom <= snapshotSummary.height,
+    'Run summary fits inside the exported metrics image',
   );
   assert.ok(
     fs.statSync(path.join(profile, 'metrics-final.png')).size > 5000,

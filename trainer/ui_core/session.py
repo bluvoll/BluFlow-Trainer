@@ -420,16 +420,7 @@ class Session:
         return self.state()
 
     def _paths(self, flat):
-        if flat.get("dataset.subsets"):
-            return list(
-                dict.fromkeys(
-                    str(s.get("path") or "").strip()
-                    for s in flat["dataset.subsets"]
-                    if str(s.get("path") or "").strip()
-                )
-            )
-        path = str(flat.get("dataset.path") or "").strip()
-        return [path] if path else []
+        return bridge.dataset_paths(flat)
 
     def gpu_arg(self):
         return (
@@ -550,7 +541,7 @@ class Session:
         else:
             raise ValueError("Unknown job action")
         if not jobs:
-            raise ValueError("Choose a dataset folder or add dataset subsets first")
+            raise ValueError("Choose an active dataset folder; zero repeats or a zero target disables a folder")
         self._launch_thread(lambda: self._sequence(jobs, flat))
         return self.state()
 

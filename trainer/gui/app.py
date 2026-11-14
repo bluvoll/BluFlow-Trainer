@@ -894,7 +894,7 @@ class TrainingGUI(QtWidgets.QWidget):
         running = self.runner is not None or bool(self._queue) or self._batch_queue_active
         self.run_queue.set_busy(running)
         for box in self.gpu_boxes.values():
-            box.setEnabled(not running)
+            box.setEnabled(not running and len(self.gpu_boxes) > 1)
 
         # Advisories are evaluated against the GPU SELECTION, not just the config -- the two worst
         # ones cannot be seen from the file alone. An "error" advisory blocks Start, because the
@@ -1390,9 +1390,7 @@ class TrainingGUI(QtWidgets.QWidget):
         failing. That was the live bug here -- with subsets configured, `dataset.path` is unset, so
         both buttons ran against `.`.
         """
-        subsets = flat.get("dataset.subsets") or []
-        raw = [s.get("path") for s in subsets] if subsets else [flat.get("dataset.path")]
-        return [p for p in (str(x or "").strip() for x in raw) if p]
+        return bridge.dataset_paths(flat)
 
     def _run_each(self, launches: list, what: str) -> None:
         """Run one launch per dataset directory, in turn.
@@ -1411,7 +1409,7 @@ class TrainingGUI(QtWidgets.QWidget):
         c = self.collect()
         paths = self._dataset_paths(c)
         if not paths:
-            self.log("Nothing to cache -- set a Dataset path, or give the subset rows a folder.")
+            self.log("Nothing to cache -- choose an active dataset folder. Zero repeats or a zero target disables a folder.")
             return
         tiers = c.get("dataset.resolutions") or [c.get("dataset.resolution") or 1024]
         self._run_each([cache_launch(
@@ -1432,7 +1430,7 @@ class TrainingGUI(QtWidgets.QWidget):
         c = self.collect()
         paths = self._dataset_paths(c)
         if not paths:
-            self.log("Nothing to audit -- set a Dataset path, or give the subset rows a folder.")
+            self.log("Nothing to audit -- choose an active dataset folder. Zero repeats or a zero target disables a folder.")
             return
         steps = c.get("dataset.bucket_reso_steps") or 64
         self._run_each([audit_launch(p, steps) for p in paths], "Auditing")

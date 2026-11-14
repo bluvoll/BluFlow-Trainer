@@ -29,11 +29,14 @@ def main():
     import ultralytics
     from trainer.training.config import load_config
     from trainer.data.cache import load_and_crop
-    cfg=load_config(args.config);out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
+    cfg=load_config(args.config)
+    subsets=cfg.dataset.active_subsets()
+    if not subsets:raise ValueError('Dataset weighting produces an empty dataset')
+    out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
     for folder in ['annotations','masks','previews']:(out/folder).mkdir(exist_ok=True)
     model=YOLO(args.model)
     if model.task!='segment':raise ValueError('Expected an eye segmentation model')
-    files=sorted({p.resolve() for subset in cfg.dataset.effective_subsets()
+    files=sorted({p.resolve() for subset in subsets
                   for p in Path(subset.path).rglob('*') if p.suffix.lower() in {'.png','.jpg','.jpeg','.webp','.bmp'}})
     with open(args.model,'rb') as f:model_hash=hashlib.file_digest(f,'sha256').hexdigest()
     manifest=dict(model=str(Path(args.model).resolve()),model_sha256=model_hash,

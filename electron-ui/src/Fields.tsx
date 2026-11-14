@@ -148,7 +148,7 @@ export function CloseIcon() {
   );
 }
 
-const tableDrafts = new Map<string, Flat[]>();
+const tableDrafts = new Map<string, { revision: number; rows: Flat[] }>();
 function TargetInput({
   value,
   onChange,
@@ -199,16 +199,23 @@ function TableEditor({
   value: any;
   onChange: (v: any) => void;
 }) {
-  const { data, state } = useStore((value) => ({ data: value.data, state: value.state }));
+  const { data, state, configRevision } = useStore((value) => ({
+    data: value.data,
+    state: value.state,
+    configRevision: value.configRevision,
+  }));
   const kind = field.kind,
     curriculum = kind === 'CurriculumEditor';
-  const cacheKey = (state?.path || 'unsaved') + ':' + field.key;
-  const [retained, setRetained] = useState<Flat[]>(() => tableDrafts.get(cacheKey) || []);
+  const cacheKey = field.key;
+  const [retained, setRetained] = useState<Flat[]>(() => {
+    const draft = tableDrafts.get(cacheKey);
+    return draft?.revision === configRevision ? draft.rows : [];
+  });
   const rows: Flat[] = Array.isArray(value) && value.length ? value : curriculum ? retained : [];
   const enabled = !curriculum || (Array.isArray(value) && value.length > 0);
   const commit = (next: Flat[]) => {
     setRetained(next);
-    tableDrafts.set(cacheKey, next);
+    tableDrafts.set(cacheKey, { revision: configRevision, rows: next });
     onChange(curriculum && !enabled ? [] : next);
   };
   const columns =
@@ -352,7 +359,7 @@ function TableEditor({
                 onChange(next);
               } else {
                 setRetained(rows);
-                tableDrafts.set(cacheKey, rows);
+                tableDrafts.set(cacheKey, { revision: configRevision, rows });
                 onChange([]);
               }
             }}
@@ -413,7 +420,7 @@ function TableEditor({
             onClick={() => {
               const next = data?.curriculumPreset || [];
               setRetained(next);
-              tableDrafts.set(cacheKey, next);
+              tableDrafts.set(cacheKey, { revision: configRevision, rows: next });
               onChange(next);
             }}
           >
@@ -676,7 +683,10 @@ function Editor({ field, value }: { field: Field; value: any }) {
 }
 
 export default function FieldRow({ field }: { field: Field }) {
-  const { state } = useStore((value) => ({ state: value.state }));
+  const { state, configRevision } = useStore((value) => ({
+    state: value.state,
+    configRevision: value.configRevision,
+  }));
   if (!state) return null;
   const disabled = state.validation.enabled[field.key] === false;
   const full = [
@@ -708,7 +718,7 @@ export default function FieldRow({ field }: { field: Field }) {
     >
       {!field.inline && <label className="field-label">{field.label}</label>}
       <div className="field-control">
-        <Editor field={field} value={state.flat[field.key]} />
+        <Editor key={configRevision} field={field} value={state.flat[field.key]} />
       </div>
     </fieldset>
   );

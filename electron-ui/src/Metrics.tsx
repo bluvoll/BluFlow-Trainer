@@ -163,6 +163,12 @@ export function MetricsView({
         <Chart title="Step time · s/it" records={metrics.records} series={SPEED} />
         <Chart title="Peak allocated VRAM · GiB" records={metrics.records} series={memory} />
       </div>
+      {metrics.reports.length > 0 && (
+        <section className="metrics-summary" aria-label="Run summary">
+          <strong>Run summary</strong>
+          <pre>{metrics.reports.join('\n')}</pre>
+        </section>
+      )}
     </div>
   );
 }

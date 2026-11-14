@@ -983,6 +983,23 @@ tr:last-child > td {
   margin-top: 8px;
   font-size: 10px;
 }
+.metrics-summary {
+  flex: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  background: var(--ui-input);
+  font-size: 11px;
+}
+.metrics-summary pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 10px;
+  line-height: 1.4;
+}
 .chart-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1071,6 +1088,9 @@ tr:last-child > td {
 }
 .snapshot-metrics .chart-grid {
   min-height: 450px;
+}
+.snapshot-metrics .metrics-summary pre {
+  max-height: none;
 }
 .dialog-scrim {
   position: fixed;

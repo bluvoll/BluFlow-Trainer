@@ -1,9 +1,34 @@
 """Allocator choices affect new child processes without changing the GUI environment."""
 from types import SimpleNamespace
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from trainer.gui import process
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux launch script")
+def test_electron_launcher_passes_expandable_segments_to_children(tmp_path):
+    node = tmp_path / "node"
+    node.write_text('#!/bin/sh\nprintf \'%s\\n\' "${PYTORCH_ALLOC_CONF-unset}" '
+                    '"$PYTORCH_CUDA_ALLOC_CONF" "$@"\n')
+    node.chmod(0o755)
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["bash", str(root / "start-electron.sh"), "--no-update-check"],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+             "PYTORCH_ALLOC_CONF": "backend:cudaMallocAsync",
+             "PYTORCH_CUDA_ALLOC_CONF": "backend:native"},
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.splitlines() == [
+        "unset", "expandable_segments:True", "scripts/electron.cjs", "start",
+        "--no-update-check",
+    ]
 
 
 @pytest.mark.parametrize("inherited", [

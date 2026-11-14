@@ -10,6 +10,7 @@ type Store = {
   category: string;
   panel: string;
   paused: boolean;
+  configRevision: number;
   revision: number;
 };
 let current: Store = {
@@ -22,6 +23,7 @@ let current: Store = {
   category: 'Training',
   panel: 'settings',
   paused: false,
+  configRevision: 0,
   revision: 0,
 };
 const listeners = new Set<() => void>(),
@@ -69,9 +71,15 @@ function optimistic(flat: Flat) {
     ...Object.fromEntries(Object.entries(pending).map(([key, edit]) => [key, edit.value])),
   };
 }
-export function accept(result: any) {
+export function accept(result: any, opened = false) {
   const value: State | undefined = result?.state || (result?.flat && result);
-  if (value) publish({ state: { ...value, flat: optimistic(value.flat) } });
+  if (value)
+    publish({
+      state: { ...value, flat: optimistic(value.flat) },
+      // Opening, including Reload of the same path, discards editor-only drafts.
+      // Saving/renaming keeps the current editing session and its disabled drafts.
+      configRevision: current.configRevision + (opened ? 1 : 0),
+    });
   return result;
 }
 export function error(error: unknown) {
@@ -136,7 +144,7 @@ export async function command(method: string, params: any = {}) {
     ].includes(method)
   )
     await flush();
-  return accept(await window.bluflow.request(method, params));
+  return accept(await window.bluflow.request(method, params), method === 'config.open');
 }
 export async function initialize() {
   window.bluflow.onEvent((event) => {

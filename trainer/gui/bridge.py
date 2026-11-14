@@ -30,7 +30,7 @@ from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults
 
 from ..data.caption import CaptionConfig
 from ..data.texture import TextureConfig
-from ..data.dataset import DatasetConfig
+from ..data.dataset import DatasetConfig, SubsetConfig
 from ..training.config import (
     AdapterConfig,
     ComponentLRs,
@@ -81,6 +81,29 @@ _SKIP = {("dataset", "caption"), ("dataset", "texture")}
 # the schema rather than special-cased at each call site. The value is a list of phase dicts; the
 # empty list is the default and means "no curriculum", which is exactly today's behaviour.
 ARRAY_KEYS: dict[str, list] = {"curriculum": []}
+
+
+def dataset_paths(flat: dict) -> list[str]:
+    """Active source folders for both GUIs' cache/audit jobs, in config order.
+
+    Incomplete editor rows are ignored rather than treating an empty path as the
+    repository root. Dataset validation still diagnoses duplicate source rows.
+    """
+    rows = flat.get("dataset.subsets") or [{
+        "path": flat.get("dataset.path"),
+        "num_repeats": flat.get("dataset.num_repeats", 1),
+        "target_images": flat.get("dataset.target_images"),
+    }]
+    paths = []
+    for row in rows:
+        path = str(row.get("path") or "").strip()
+        if not path:
+            continue
+        subset = SubsetConfig(path, num_repeats=row.get("num_repeats", 1),
+                              target_images=row.get("target_images"))
+        if subset.active and path not in paths:
+            paths.append(path)
+    return paths
 
 
 def schema() -> dict[str, dc.Field]:

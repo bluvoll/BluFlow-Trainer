@@ -41,6 +41,9 @@ Package refresh and renderer rebuild happen after the running backend has closed
 then the launcher restarts the application. The existing PySide launch scripts
 and `python -m trainer.gui` remain available.
 
+On Linux, `start-electron.sh` enables PyTorch expandable memory segments for
+the application and its training children, matching `start-gui.sh`.
+
 ## Workspace
 
 - The left Configuration panel selects Dataset, Training, Optimizer, Method,
