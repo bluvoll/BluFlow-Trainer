@@ -193,7 +193,16 @@ async function captureMetrics(event) {
     });
     await capture.loadURL('bluflow-app://ui/index.html?snapshot=' + randomUUID());
     await ready;
-    const png = (await capture.webContents.capturePage()).toPNG();
+    clearTimeout(timeout);
+    // Renderer readiness does not guarantee that the compositor has painted,
+    // especially for a hidden Windows window during shutdown. Request a full
+    // repaint and export the resulting offscreen bitmap instead of an older
+    // capturePage surface that can still contain only the background.
+    const png = await new Promise((resolve, reject) => {
+      timeout = setTimeout(() => reject(Error('Metrics repaint timed out')), 15000);
+      capture.webContents.once('paint', (_event, _dirty, image) => resolve(image.toPNG()));
+      capture.webContents.invalidate();
+    });
     if (!png.length) throw Error('Metrics capture was empty');
     fs.mkdirSync(path.dirname(event.path), { recursive: true });
     const temporary = event.path + '.' + randomUUID() + '.tmp';

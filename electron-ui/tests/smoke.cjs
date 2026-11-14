@@ -691,6 +691,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   );
   await app.close();
   app = undefined;
+  fs.copyFileSync(closingCapture, path.join(artifacts, 'metrics-on-close.png'));
   assert.ok(
     fs.statSync(closingCapture).size > 5000,
     'Closing waits for pending final metrics export',
