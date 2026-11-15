@@ -41,7 +41,8 @@ def normalize(flat, previous=None):
                 )
                 shares[-1] = 1 - sum(shares[:-1])
                 value["resolution_schedule.stages"] = [
-                    dict(resolution=t, share=w, lr_mul={512: 0.8, 768: 0.9}.get(t, 1.0))
+                    dict(resolution=t, **({'epochs': 1.} if value.get('resolution_schedule.unit') == 'stage_epochs' else {'share': w}),
+                         lr_mul={512: 0.8, 768: 0.9}.get(t, 1.0))
                     for t, w in zip(tiers, shares)
                 ]
             value["dataset.resolutions"] = tiers
@@ -56,6 +57,29 @@ def normalize(flat, previous=None):
                 )
             if not value.get("train.max_steps"):
                 value["train.max_steps"] = 560
+        unit = value.get('resolution_schedule.unit', 'steps')
+        old_unit = previous.get('resolution_schedule.unit', 'steps')
+        if unit != old_unit:
+            stages = value.get('resolution_schedule.stages') or []
+            if unit == 'stage_epochs':
+                # Converting shares of epochs preserves their rounded allocations.
+                # Step shares cannot imply epochs without a dataset scan: start at
+                # one epoch per stage and let the user set the desired exposure.
+                durations = [1.] * len(stages)
+                if old_unit == 'epochs':
+                    try:
+                        share_rows = [{k: v for k, v in s.items() if k != 'epochs'} for s in stages]
+                        durations = ResolutionSchedule(enabled=True, stages=share_rows, unit=old_unit).budgets(value.get('train.epochs'))
+                    except (ValueError, TypeError):
+                        pass
+                value['resolution_schedule.stages'] = [dict(resolution=s['resolution'], epochs=s.get('epochs', n), lr_mul=s.get('lr_mul', 1.))
+                                                       for s, n in zip(stages, durations)]
+            elif old_unit == 'stage_epochs' and stages:
+                durations = [s.get('epochs') or 1. for s in stages]
+                shares = [round(d / sum(durations), 6) for d in durations]
+                shares[-1] = 1 - sum(shares[:-1])
+                value['resolution_schedule.stages'] = [dict(resolution=s['resolution'], share=s.get('share', n), lr_mul=s.get('lr_mul', 1.))
+                                                       for s, n in zip(stages, shares)]
         kind = value.get("optimizer.kind")
         if kind != previous.get("optimizer.kind") and kind in OPTIMIZERS:
             value.update(
@@ -165,18 +189,23 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
     stages = None
     if flat.get("resolution_schedule.enabled"):
         try:
+            # The Electron batch editor preserves unfinished input (e.g. "1536=")
+            # as text. Validation reports that draft; it is not a map we can index
+            # by resolution yet. Keep state/save/stop usable while the user edits.
+            batch_sizes = flat.get("train.batch_size")
+            if not isinstance(batch_sizes, dict):
+                raise ValueError("Stage preview requires per-tier batch sizes")
             unit = flat.get('resolution_schedule.unit', 'steps')
             budgets = ResolutionSchedule(
                 enabled=True, stages=flat["resolution_schedule.stages"], unit=unit
             ).budgets(flat.get('train.epochs' if unit == 'epochs' else 'train.max_steps'))
             stages = [
                 dict(
-                    **stage,
-                    steps=budget if unit == 'steps' else None,
-                    epochs=budget if unit == 'epochs' else None,
+                    **{**stage, 'steps': budget if unit == 'steps' else None,
+                       'epochs': budget if unit != 'steps' else None},
                     unit=unit,
                     effective_batch=(
-                        flat["train.batch_size"][stage["resolution"]]
+                        int(batch_sizes[stage["resolution"]])
                         * processes
                         * flat.get("train.gradient_accumulation_steps", 1)
                     ),

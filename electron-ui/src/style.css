@@ -211,10 +211,58 @@ h2 {
   min-width: 0;
   flex: 1;
 }
-.config-actions > select {
+.config-picker {
+  position: relative;
+  min-width: 0;
   width: 270px;
   max-width: 360px;
   flex: 1;
+}
+.config-picker-trigger {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  justify-content: space-between;
+}
+.config-picker-trigger > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-picker-popup {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 100;
+  width: max(100%, min(600px, 85vw));
+  padding: 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 5px;
+  background: var(--ui-panel);
+  box-shadow: 0 8px 24px #0008;
+}
+.config-picker-popup > input {
+  width: 100%;
+  margin-bottom: 6px;
+}
+.config-picker-results {
+  max-height: min(400px, 60vh);
+  overflow-y: auto;
+}
+.config-picker-results > button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+  border-color: transparent;
+}
+.config-picker-results > button[aria-current] {
+  background: var(--ui-selected);
+}
+.config-picker-results > p {
+  padding: 8px;
+  margin: 0;
 }
 .toolbar-menus {
   display: flex;
@@ -446,14 +494,14 @@ h2 {
   height: 100%;
   overflow: auto;
   scrollbar-gutter: stable;
-  padding: 18px 18px 30px;
+  padding: 10px 10px 16px;
 }
 .content-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 18px;
+  margin-bottom: 10px;
 }
 .content-heading h2 {
   margin-bottom: 0;
@@ -465,9 +513,9 @@ h2 {
 }
 .settings-groups {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
   grid-auto-rows: 4px;
-  column-gap: 14px;
+  column-gap: 10px;
   align-items: start;
 }
 .settings-group {
@@ -483,8 +531,8 @@ h2 {
   border: 0;
   border-radius: 0;
   width: 100%;
-  min-height: 36px;
-  padding: 9px 12px;
+  min-height: 30px;
+  padding: 6px 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -497,17 +545,17 @@ h2 {
   font-size: 10px;
 }
 .group-content {
-  padding: 6px 12px 12px;
+  padding: 4px 8px 8px;
 }
 .field-row {
   border: 0;
   margin: 0;
-  padding: 7px 0;
+  padding: 4px 0;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(110px, 0.9fr) minmax(130px, 1.1fr);
   align-items: center;
-  gap: 9px;
+  gap: 6px;
 }
 .field-row:disabled > .field-label {
   opacity: 0.42;
@@ -709,7 +757,7 @@ tr:last-child > td {
   height: 100%;
 }
 .run-section {
-  padding: 15px 14px;
+  padding: 10px;
   border-bottom: 1px solid var(--ui-border);
 }
 .section-caption {
@@ -781,7 +829,7 @@ tr:last-child > td {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  padding: 16px 14px;
+  padding: 10px;
   margin-top: auto;
 }
 .run-actions .primary {
@@ -1293,7 +1341,7 @@ tr:last-child > td {
     height: 27px;
     font-size: 19px;
   }
-  .config-actions > select {
+  .config-picker {
     width: 170px;
   }
   .app-toolbar button {
@@ -1301,7 +1349,7 @@ tr:last-child > td {
     font-size: 11px;
   }
   .settings-panel {
-    padding: 14px 12px;
+    padding: 8px;
   }
   .field-row {
     grid-template-columns: minmax(110px, 1fr) minmax(120px, 1fr);

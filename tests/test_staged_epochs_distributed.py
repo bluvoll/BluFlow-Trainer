@@ -9,9 +9,11 @@ import torch.multiprocessing as mp
 import pytest
 
 
-def epoch_worker(rank, root):
+def epoch_worker(rank, root, explicit=False):
     from test_resolution_schedule import Samples, enable_checkpoint_saving
     from test_staged_epochs import epoch_trainer
+    from test_stage_exposure import fractional_trainer
+    factory = fractional_trainer if explicit else epoch_trainer
     torch.set_num_threads(1)
     os.environ.update(RANK=str(rank), WORLD_SIZE='2', LOCAL_RANK=str(rank), LOCAL_WORLD_SIZE='2',
                       MASTER_ADDR='127.0.0.1', MASTER_PORT='29587', OMP_NUM_THREADS='1')
@@ -22,14 +24,15 @@ def epoch_worker(rank, root):
         if rank == 0:
             Samples(root)
         dist.barrier()
-        first = epoch_trainer(root)
+        first = factory(root)
         first.accelerator.end_training = lambda: None
         enable_checkpoint_saving(first, root)
         first.train()
         assert first.sampler.epoch_batches == [2, 2, 4]
-        assert first.sampler.budgets == [1, 1, 6]
+        assert first.sampler.budgets == ([1, 2, 5] if explicit else [1, 1, 6])
         assert first.global_step == first.successful_updates == 8
-        assert first.stage_attempts == [1, 1, 6]
+        assert first.stage_attempts == first.sampler.budgets
+        assert first.stage_images == [row['images'] for row in first.sampler.plan]
         final = {k: v.detach().clone() for k, v in first._unwrap(first.transformer).state_dict().items()}
         trace = list(first.trace)
         for value in final.values():
@@ -37,12 +40,12 @@ def epoch_worker(rank, root):
             dist.broadcast(reference, 0)
             torch.testing.assert_close(value, reference, rtol=0, atol=0)
         first.accelerator.free_memory()
-        resumed = epoch_trainer(root)
+        resumed = factory(root)
         resumed.accelerator.end_training = lambda: None
         enable_checkpoint_saving(resumed, root)
         resumed._resume(str(root/'output'/'staged-test-step000003-state'))
         resumed.train()
-        assert resumed.trace == trace[6:]
+        assert resumed.trace == trace[4 if explicit else 6:]
         assert resumed.stage_images == first.stage_images
         assert resumed.lr_trace == first.lr_trace[3:]
         for key, value in resumed._unwrap(resumed.transformer).state_dict().items():
@@ -54,11 +57,12 @@ def epoch_worker(rank, root):
             dist.destroy_process_group()
 
 
-def test_two_rank_epochs_and_resume(tmp_path):
+@pytest.mark.parametrize('explicit', [False, True])
+def test_two_rank_epochs_and_resume(tmp_path, explicit):
     try:
         dist.ProcessGroupGloo.create_default_device()
     except RuntimeError as exc:
         if 'unsupported gloo device' in str(exc):
             pytest.skip(f'This Torch build cannot create a Gloo transport: {exc}')
         raise
-    mp.spawn(epoch_worker, args=(str(tmp_path),), nprocs=2, join=True)
+    mp.spawn(epoch_worker, args=(str(tmp_path), explicit), nprocs=2, join=True)

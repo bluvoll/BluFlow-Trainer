@@ -103,7 +103,22 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
     const state = await window.bluflow.request('state');
     await window.bluflow.request('gpus.set', { selected: [state.gpus[0].index] });
   });
-  await page.getByLabel('Configuration preset').selectOption(path.join(configs, 'smoke.toml'));
+  const chooseConfig = async (filename) => {
+    await page.getByRole('button', { name: 'Configuration preset', exact: true }).click();
+    await page
+      .getByRole('searchbox', { name: 'Find configuration' })
+      .fill(filename.replace(/\.toml$/, ''));
+    await page
+      .getByRole('dialog', { name: 'Choose configuration' })
+      .locator('button')
+      .filter({ hasText: filename.replace(/\.toml$/, '') })
+      .click();
+  };
+  await page.getByRole('button', { name: 'Configuration preset', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Find configuration' }).fill('no-such-config');
+  await page.getByText('No matching configurations', { exact: true }).waitFor();
+  await page.getByRole('searchbox', { name: 'Find configuration' }).press('Escape');
+  await chooseConfig('smoke.toml');
   await page.locator('[data-field="train.run_name"] input').waitFor();
   await page.screenshot({ path: path.join(artifacts, 'workspace.png') });
   const fields = await page.evaluate(
@@ -150,7 +165,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   const curriculumToggle = curriculum.getByRole('checkbox', { name: 'Enable curriculum' });
   const openFixture = async (filename) => {
     const target = path.join(configs, filename);
-    await page.getByLabel('Configuration preset').selectOption(target);
+    await chooseConfig(filename);
     await page.waitForFunction(
       async (target) => (await window.bluflow.request('state')).path === target,
       target,
@@ -282,6 +297,21 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
     async () => (await window.bluflow.request('state')).validation,
   );
   assert.equal(stageValidation.valid, true, stageValidation.error + '\n' + epochRecipe);
+  await page
+    .getByLabel('Stage duration', { exact: true })
+    .selectOption({ label: 'Epochs per stage' });
+  await page.getByLabel('Row 1 Epochs', { exact: true }).fill('0.5');
+  await page.waitForFunction(async () => {
+    const state = await window.bluflow.request('state');
+    return (
+      state.validation.valid &&
+      state.flat['resolution_schedule.stages'][0].epochs === 0.5 &&
+      state.flat['resolution_schedule.stages'].every((s) => !('share' in s))
+    );
+  });
+  assert.equal(await page.locator('[data-field="train.epochs"]').count(), 0);
+  assert.equal(await page.locator('[data-field="train.max_steps"]').count(), 0);
+  await page.getByRole('button', { name: 'Calculate dataset exposure', exact: true }).waitFor();
   await page.getByRole('checkbox', { name: 'Staged resolutions', exact: true }).uncheck();
   await page.waitForFunction(
     async () => !(await window.bluflow.request('state')).flat['resolution_schedule.enabled'],

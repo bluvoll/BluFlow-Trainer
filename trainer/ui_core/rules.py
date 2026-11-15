@@ -98,8 +98,8 @@ _RULES = {
         )
     ),
     "train.epochs": lambda c: not c.get("resolution_schedule.enabled") or c.get('resolution_schedule.unit') == 'epochs',
-    "train.save_every_epochs": lambda c: not c.get("resolution_schedule.enabled") or c.get('resolution_schedule.unit') == 'epochs',
-    "train.max_steps": lambda c: not c.get("resolution_schedule.enabled") or c.get('resolution_schedule.unit') != 'epochs',
+    "train.save_every_epochs": lambda c: not c.get("resolution_schedule.enabled") or c.get('resolution_schedule.unit') in ('epochs', 'stage_epochs'),
+    "train.max_steps": lambda c: not c.get("resolution_schedule.enabled") or c.get('resolution_schedule.unit', 'steps') == 'steps',
     "resolution_schedule.unit": lambda c: bool(c.get('resolution_schedule.enabled')),
     "dataset.num_repeats": lambda c: c.get('dataset.target_images') is None and not c.get('dataset.subsets'),
     "dataset.target_images": lambda c: not c.get('dataset.subsets'),

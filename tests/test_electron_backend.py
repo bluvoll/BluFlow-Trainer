@@ -182,6 +182,57 @@ def test_normalization_stages_optimizer_and_quantization(session):
     assert before["resolution_schedule.stages"] == flat["resolution_schedule.stages"]
 
 
+@pytest.mark.parametrize("draft", [
+    "512=28, 768=13, 1024=7, 1280=3, 1536=",
+    "512=28, 768=13, 1024=7, 1280=3,",
+    "",
+    1,
+    None,
+    [28, 13, 7, 3, 3],
+    {512: 28, 768: 13, 1024: 7, 1280: 3},
+])
+def test_staged_batch_drafts_remain_editable_and_recover(session, draft):
+    from trainer.electron_backend.__main__ import Server
+    from trainer.training.config import load_config
+
+    tiers = [512, 768, 1024, 1280, 1536]
+    batches = dict(zip(tiers, [28, 13, 7, 3, 3]))
+    server = Server(session, lambda message: None)
+
+    def request(method, **params):
+        return server.handle(dict(method=method, params=params))
+
+    request("config.edit", patch={
+        "resolution_schedule.enabled": True,
+        "resolution_schedule.stages": [
+            dict(resolution=tier, share=share, lr_mul=1.)
+            for tier, share in zip(tiers, [.1, .1, .4, .2, .2])
+        ],
+        "dataset.resolutions": tiers,
+        "dataset.source": "latents",
+        "train.max_steps": 1120,
+        "train.batch_size": batches,
+        "train.attention_backend": "flash_attn_2" if sys.platform == "win32" else "torch_varlen",
+    })
+    edited = request("config.edit", patch={"train.batch_size": draft})
+    assert edited["flat"]["train.batch_size"] == draft
+    assert not edited["validation"]["valid"]
+    assert edited["validation"]["error"]
+    assert edited["validation"]["stages"] is None
+    # Saving a draft, polling state, and stopping must not fail in the preview.
+    assert Path(request("config.save")["path"]).is_file()
+    assert request("state")["validation"]["stages"] is None
+    assert request("job.stop")["validation"]["stages"] is None
+
+    repaired = request("config.edit", patch={"train.batch_size": batches})
+    assert repaired["validation"]["valid"], repaired["validation"]["error"]
+    assert [s["steps"] for s in repaired["validation"]["stages"]] == [112, 112, 448, 224, 224]
+    assert [s["effective_batch"] for s in repaired["validation"]["stages"]] == [28, 13, 7, 3, 3]
+    saved = request("config.save")["path"]
+    assert load_config(saved).train.batch_size == batches
+    assert request("config.open", path=saved)["validation"]["valid"]
+
+
 def test_save_external_copy_rename_and_collision(session):
     external = source(session, "external")
     original = external.read_bytes()

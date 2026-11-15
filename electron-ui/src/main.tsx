@@ -8,9 +8,40 @@ import type { Metrics } from './types';
 
 function Snapshot({ metrics }: { metrics: Metrics }) {
   useEffect(() => {
-    void document.fonts.ready.then(() =>
-      requestAnimationFrame(() => requestAnimationFrame(() => window.bluflow.ready())),
-    );
+    let cancelled = false;
+    let frame = 0;
+    let last = '';
+    let stable = 0;
+    // ResizeObserver schedules canvas drawing separately from React's commit.
+    // Wait for every plot at its final dimensions, not just the surrounding text.
+    const check = () => {
+      if (cancelled) return;
+      const canvases = [
+        ...document.querySelectorAll<HTMLCanvasElement>('.snapshot-metrics canvas'),
+      ];
+      const charts = canvases.map((canvas) => {
+        const { x, y, width, height } = canvas.getBoundingClientRect();
+        return { x, y, width, height };
+      });
+      const key = JSON.stringify(charts);
+      const painted =
+        canvases.length === 4 &&
+        canvases.every(
+          (canvas, i) =>
+            canvas.dataset.rendered === 'true' && charts[i].width > 0 && charts[i].height > 0,
+        );
+      stable = painted && key === last ? stable + 1 : 0;
+      last = key;
+      if (stable >= 2) window.bluflow.ready({ charts, width: innerWidth, height: innerHeight });
+      else frame = requestAnimationFrame(check);
+    };
+    void document.fonts.ready.then(() => {
+      if (!cancelled) frame = requestAnimationFrame(check);
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
   }, []);
   return <MetricsView metrics={metrics} snapshot />;
 }

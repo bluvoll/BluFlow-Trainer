@@ -42,6 +42,7 @@ class Server:
             "preferences.set": lambda p: session.set_preferences(p["patch"]),
             "gpus.set": lambda p: session.select_gpus(p["selected"]),
             "preview.timestep": lambda p: session.set_preview(p["height"], p["width"]),
+            "preview.stages": self.stage_preview,
             "queue.add": lambda p: session.add_queue(p["paths"]),
             "queue.edit": lambda p: session.queue_edit(
                 p["operation"], p.get("ids", []), p.get("direction", 0)
@@ -67,6 +68,10 @@ class Server:
             "startup.check": self.startup_check,
             "startup.update": self.startup_update,
         }
+
+    def stage_preview(self, params):
+        from ..ui_core.stage_preview import preview_stages
+        return preview_stages(params['flat'], params['world'])
 
     def export_result(self, params):
         if params.get("error"):

@@ -62,6 +62,7 @@ const allowed = new Set([
   'preferences.set',
   'gpus.set',
   'preview.timestep',
+  'preview.stages',
   'queue.add',
   'queue.edit',
   'queue.start',
@@ -140,10 +141,10 @@ ipcMain.handle('bluflow:snapshot', (event) => {
   if (!item) throw Error('Unknown metrics capture');
   return item.metrics;
 });
-ipcMain.on('bluflow:ready', (event) => {
+ipcMain.on('bluflow:ready', (event, plots) => {
   const capture = captures.get(event.sender.id);
   if (capture) {
-    capture.ready();
+    capture.ready(plots);
     return;
   }
   if (event.sender === window?.webContents && !test) window.show();
@@ -192,13 +193,17 @@ async function captureMetrics(event) {
       timeout = setTimeout(() => reject(Error('Metrics capture timed out')), 15000);
     });
     await capture.loadURL('bluflow-app://ui/index.html?snapshot=' + randomUUID());
-    await ready;
+    const plots = await ready;
     clearTimeout(timeout);
     // Renderer readiness does not guarantee that the compositor has painted,
     // especially for a hidden Windows window during shutdown. Request a full
     // repaint and export the resulting offscreen bitmap instead of an older
     // capturePage surface that can still contain only the background.
-    const png = await require('./metrics-capture.cjs').captureMetricsPng(capture.webContents);
+    const png = await require('./metrics-capture.cjs').captureMetricsPng(
+      capture.webContents,
+      15000,
+      plots,
+    );
     if (!png.length) throw Error('Metrics capture was empty');
     fs.mkdirSync(path.dirname(event.path), { recursive: true });
     const temporary = event.path + '.' + randomUUID() + '.tmp';
@@ -295,13 +300,18 @@ app
     });
     const display = screen.getPrimaryDisplay().workAreaSize;
     const bounds = presentation.bounds || {};
-    const width = Math.max(1050, Math.min(Number(bounds.width) || 1600, display.width));
-    const height = Math.max(700, Math.min(Number(bounds.height) || 1000, display.height));
+    const minWidth = Math.min(960, display.width - 16);
+    const minHeight = Math.min(540, display.height - 40);
+    const width = Math.min(display.width - 16, Math.max(minWidth, Number(bounds.width) || 1600));
+    const height = Math.min(
+      display.height - 40,
+      Math.max(minHeight, Number(bounds.height) || 1000),
+    );
     window = new BrowserWindow({
       width,
       height,
-      minWidth: 1050,
-      minHeight: 700,
+      minWidth,
+      minHeight,
       title: 'BluFlow-Trainer',
       show: false,
       backgroundColor: '#101116',

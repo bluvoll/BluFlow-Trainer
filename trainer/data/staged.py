@@ -6,6 +6,7 @@ import math
 from dataclasses import asdict
 from pathlib import Path
 from .dataset import BucketBatchSampler
+from ..training.stage_plan import resolve_stage_plan
 
 
 class StagedBatchSampler(BucketBatchSampler):
@@ -16,12 +17,16 @@ class StagedBatchSampler(BucketBatchSampler):
         self.rank, self.world, self.accumulation = rank, world, accumulation
         self.indices = {s.resolution: [i for i, e in enumerate(dataset.entries) if e.resolution == s.resolution]
                         for s in schedule.stages}
-        self.epoch_mode = schedule.unit == 'epochs'
+        self.epoch_mode = schedule.epoch_based
         self.epoch_budgets = list(self.budgets) if self.epoch_mode else None
+        self.plan = resolve_stage_plan(schedule, steps,
+                                      {s.resolution: len(self._indices(0, s.resolution)) for s in schedule.stages},
+                                      self._by_tier, world, accumulation)
         if self.epoch_mode:
+            self.epoch_counts = [len(row['epoch_samples']) for row in self.plan]
             self.epoch_batches = [math.ceil(len(self._indices(0, s.resolution)) /
                                            (self._by_tier[s.resolution] * world)) for s in schedule.stages]
-            self.budgets = [n * math.ceil(b / accumulation) for n, b in zip(self.epoch_budgets, self.epoch_batches)]
+            self.budgets = [row['steps'] for row in self.plan]
             if any(b == 0 for b in self.epoch_batches):
                 raise ValueError('Every resolution stage needs at least one eligible sample')
         if any(not indices for indices in self.indices.values()):
@@ -63,7 +68,11 @@ class StagedBatchSampler(BucketBatchSampler):
 
     def configure_epoch(self, stage, epoch, cursor=0):
         self.stage, self.epoch, self.cursor = stage, epoch, cursor
-        self.count = self.epoch_batches[stage] - cursor
+        self.count = self.epoch_batch_count(stage, epoch) - cursor
+
+    def epoch_batch_count(self, stage, epoch):
+        local = epoch - sum(self.epoch_counts[:stage])
+        return self.plan[stage]['epoch_microbatches'][local]
 
     def configure(self, stage, cursor, updates):
         self.stage, self.cursor = stage, cursor
@@ -78,6 +87,8 @@ class StagedBatchSampler(BucketBatchSampler):
         stage, cursor, count = self.stage, self.cursor, self.count
         if self.epoch_mode:
             order = self._order(self.epoch, stage)
+            local = self.epoch - sum(self.epoch_counts[:stage])
+            order = order[:self.plan[stage]['epoch_samples'][local]]
             bs = self._by_tier[self.schedule.stages[stage].resolution]
             for micro in range(cursor, cursor + count):
                 first = (micro * self.world + self.rank) * bs

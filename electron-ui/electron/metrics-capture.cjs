@@ -3,13 +3,39 @@
 function hasContent(image) {
   const pixels = image.toBitmap();
   for (let i = 4; i < pixels.length; i += 4) {
-    if (pixels[i] !== pixels[0] || pixels[i + 1] !== pixels[1] ||
-        pixels[i + 2] !== pixels[2]) return true;
+    if (pixels[i] !== pixels[0] || pixels[i + 1] !== pixels[1] || pixels[i + 2] !== pixels[2])
+      return true;
   }
   return false;
 }
 
-function captureMetricsPng(contents, timeoutMs = 15000) {
+function graphsPainted(image, plots) {
+  if (!plots) return true;
+  if (plots.charts?.length !== 4 || !(plots.width > 0) || !(plots.height > 0)) return false;
+  const size = image.getSize();
+  const sx = size.width / plots.width,
+    sy = size.height / plots.height;
+  return plots.charts.every((r) => {
+    // Stay inside the canvas: section borders/headings must not satisfy this test.
+    const rect = {
+      x: Math.ceil((r.x + 4) * sx),
+      y: Math.ceil((r.y + 4) * sy),
+      width: Math.floor((r.width - 8) * sx),
+      height: Math.floor((r.height - 8) * sy),
+    };
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.x >= 0 &&
+      rect.y >= 0 &&
+      rect.x + rect.width <= size.width &&
+      rect.y + rect.height <= size.height &&
+      hasContent(image.crop(rect))
+    );
+  });
+}
+
+function captureMetricsPng(contents, timeoutMs = 15000, plots) {
   return new Promise((resolve, reject) => {
     let repaint;
     const cleanup = () => {
@@ -18,11 +44,14 @@ function captureMetricsPng(contents, timeoutMs = 15000) {
       contents.removeListener('paint', paint);
       contents.removeListener('destroyed', destroyed);
     };
-    const fail = (error) => { cleanup(); reject(error); };
+    const fail = (error) => {
+      cleanup();
+      reject(error);
+    };
     const destroyed = () => fail(Error('Metrics window closed before capture'));
     const paint = (_event, _dirty, image) => {
       try {
-        if (hasContent(image)) {
+        if (hasContent(image) && graphsPainted(image, plots)) {
           const png = image.toPNG();
           cleanup();
           resolve(png);
@@ -31,12 +60,21 @@ function captureMetricsPng(contents, timeoutMs = 15000) {
           clearTimeout(repaint);
           repaint = setTimeout(() => contents.invalidate(), 16);
         }
-      } catch (error) { fail(error); }
+      } catch (error) {
+        fail(error);
+      }
     };
-    const timeout = setTimeout(() => fail(Error('Metrics capture did not paint content')), timeoutMs);
+    const timeout = setTimeout(
+      () => fail(Error('Metrics capture did not paint content in every graph')),
+      timeoutMs,
+    );
     contents.on('paint', paint);
     contents.once('destroyed', destroyed);
-    try { contents.invalidate(); } catch (error) { fail(error); }
+    try {
+      contents.invalidate();
+    } catch (error) {
+      fail(error);
+    }
   });
 }
 

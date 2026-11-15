@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Field, Flat } from './types';
 import { edit, error, useStore } from './store';
+import { StageExposure } from './StageExposure';
 
 export const editorKinds = [
   'TextEditor',
@@ -206,6 +207,7 @@ function TableEditor({
   }));
   const kind = field.kind,
     curriculum = kind === 'CurriculumEditor';
+  const explicitEpochs = state?.flat['resolution_schedule.unit'] === 'stage_epochs';
   const cacheKey = field.key;
   const [retained, setRetained] = useState<Flat[]>(() => {
     const draft = tableDrafts.get(cacheKey);
@@ -225,7 +227,7 @@ function TableEditor({
         ? ['Start %', 't min', 't max', 'Mode', 'LR ×']
         : kind === 'BlockLRRangesEditor'
           ? ['First block', 'Last block', 'LR ×']
-          : ['Resolution', 'Share %', 'LR %'];
+          : ['Resolution', explicitEpochs ? 'Epochs' : 'Share %', 'LR %'];
   const add = () => {
     const firstBlock = Array.from({ length: 42 }, (_, i) => i).find(
       (i) => !rows.some((row) => i >= row.start && i <= row.end),
@@ -243,7 +245,7 @@ function TableEditor({
             }
           : kind === 'BlockLRRangesEditor'
             ? { start: firstBlock, end: firstBlock, lr_mul: 1 }
-            : { resolution: 1024, share: 0.2, lr_mul: 1 };
+            : { resolution: 1024, ...(explicitEpochs ? { epochs: 1 } : { share: 0.2 }), lr_mul: 1 };
     commit([...rows, row]);
   };
   const cell = (row: Flat, index: number, column: number) => {
@@ -328,8 +330,9 @@ function TableEditor({
     const key =
       kind === 'BlockLRRangesEditor'
         ? ['start', 'end', 'lr_mul'][column]
-        : ['resolution', 'share', 'lr_mul'][column];
-    const percent = kind === 'ResolutionStagesEditor' && column > 0;
+        : ['resolution', explicitEpochs ? 'epochs' : 'share', 'lr_mul'][column];
+    const percent =
+      kind === 'ResolutionStagesEditor' && (column === 2 || (column === 1 && !explicitEpochs));
     return (
       <input
         aria-label={`${curriculum ? 'Phase' : 'Row'} ${index + 1} ${columns[column]}`}
@@ -442,11 +445,22 @@ function TableEditor({
           {state.validation.stages.map((stage, i) => (
             <div key={i}>
               {stage.resolution}px · {stage.epochs ?? stage.steps}{' '}
-              {stage.unit === 'epochs' ? 'epochs' : 'updates'} · effective batch{' '}
+              {stage.unit !== 'steps' ? 'epochs' : 'updates'} · effective batch{' '}
               {stage.effective_batch}
             </div>
           ))}
         </div>
+      )}
+      {kind === 'ResolutionStagesEditor' && state && (
+        <>
+          {explicitEpochs && (
+            <p>
+              Enter epochs per stage, including fractions. Switching from step shares starts at 1
+              epoch per stage; review each duration.
+            </p>
+          )}
+          <StageExposure flat={state.flat} world={state.selectedGpus.length} />
+        </>
       )}
     </div>
   );
@@ -697,13 +711,14 @@ export default function FieldRow({ field }: { field: Field }) {
   ].includes(field.kind);
   if (
     state.flat['resolution_schedule.enabled'] &&
-    state.flat['resolution_schedule.unit'] !== 'epochs' &&
-    ['train.epochs', 'train.save_every_epochs'].includes(field.key)
+    ((state.flat['resolution_schedule.unit'] !== 'epochs' && field.key === 'train.epochs') ||
+      (state.flat['resolution_schedule.unit'] === 'steps' &&
+        field.key === 'train.save_every_epochs'))
   )
     return null;
   if (
     state.flat['resolution_schedule.enabled'] &&
-    state.flat['resolution_schedule.unit'] === 'epochs' &&
+    state.flat['resolution_schedule.unit'] !== 'steps' &&
     field.key === 'train.max_steps'
   )
     return null;

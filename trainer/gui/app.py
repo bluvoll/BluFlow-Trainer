@@ -90,8 +90,10 @@ class TrainingGUI(QtWidgets.QWidget):
     def __init__(self, *, preferences=None, config_dir=None):
         super().__init__()
         self.setWindowTitle("BluFlow-Trainer")
-        self.setMinimumSize(1100, 820)
-        self.resize(1600, 1000)
+        available = self.screen().availableGeometry()
+        self.setMinimumSize(min(960, available.width() - 24), min(540, available.height() - 48))
+        # Reserve room for window decorations and the desktop's panels/taskbar.
+        self.resize(min(1600, available.width() - 24), min(1000, available.height() - 48))
 
         self.editors: dict[str, object] = {}
         self.rows: dict[str, tuple] = {}
@@ -125,6 +127,11 @@ class TrainingGUI(QtWidgets.QWidget):
 
     # ---------------------------------------------------------------- build
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'preset_combo'):
+            self.preset_combo.setMaximumWidth(280 if event.size().width() < 1400 else 488)
+
     def _setup_ui(self):
         main = QtWidgets.QVBoxLayout(self)
         main.setContentsMargins(6, 6, 6, 6)
@@ -137,17 +144,21 @@ class TrainingGUI(QtWidgets.QWidget):
         nav_lay.setSpacing(0)
         self.tab_bar = QtWidgets.QTabBar()
         self.tab_bar.setExpanding(False)
+        self.tab_bar.setUsesScrollButtons(True)
+        self.tab_bar.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        self.tab_bar.setMinimumWidth(100)
+        self.tab_bar.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         self.tab_bar.setDrawBase(False)
-        nav_lay.addWidget(self.tab_bar, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
-        nav_lay.addStretch(1)
+        nav_lay.addWidget(self.tab_bar, 1, QtCore.Qt.AlignmentFlag.AlignBottom)
         nav_lay.addWidget(make_label("config", color=THEME.text_muted))
         self.preset_combo = SearchableComboBox()
-        self.preset_combo.setMinimumWidth(338)
+        self.preset_combo.setMinimumWidth(180)
+        self.preset_combo.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         self.preset_combo.setMaximumWidth(488)
         self.preset_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.preset_combo.setMinimumContentsLength(38)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
-        nav_lay.addWidget(self.preset_combo)
+        nav_lay.addWidget(self.preset_combo, 1)
         nav_lay.addWidget(make_btn("Open", self._open))
         nav_lay.addWidget(make_btn("Save", self._save))
         nav_lay.addWidget(make_btn("Save As", self._save_as))
@@ -201,6 +212,8 @@ class TrainingGUI(QtWidgets.QWidget):
         main.addWidget(frame, 1)
         main.addWidget(self._build_footer(), 0)
         self.tab_bar.currentChanged.connect(self._refresh)
+        for index in range(self.tab_bar.count()):
+            self.tab_bar.setTabToolTip(index, self.tab_bar.tabText(index))
 
     def _show_console(self):
         self.tab_bar.setCurrentIndex(self.console_tab)
@@ -235,17 +248,20 @@ class TrainingGUI(QtWidgets.QWidget):
         # Two columns: config forms are tall and narrow, and a single column wastes half a 1600px
         # window while forcing a scroll.
         cols = QtWidgets.QHBoxLayout(inner)
-        cols.setContentsMargins(12, 12, 12, 12)
-        cols.setSpacing(12)
+        cols.setContentsMargins(8, 8, 8, 8)
+        cols.setSpacing(8)
         left = QtWidgets.QVBoxLayout()
         right = QtWidgets.QVBoxLayout()
-        left.setSpacing(10)
-        right.setSpacing(10)
+        left.setSpacing(8)
+        right.setSpacing(8)
 
         # Balance by control count rather than by group count, so one 10-key group does not sit
         # beside three 2-key ones.
         def field_form():
             form = QtWidgets.QFormLayout()
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setHorizontalSpacing(6)
+            form.setVerticalSpacing(4)
             form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight
                                    | QtCore.Qt.AlignmentFlag.AlignVCenter)
             form.setFieldGrowthPolicy(
@@ -327,8 +343,8 @@ class TrainingGUI(QtWidgets.QWidget):
         footer = QtWidgets.QWidget()
         set_role(footer, "footer")
         lay = QtWidgets.QVBoxLayout(footer)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(8, 5, 8, 5)
+        lay.setSpacing(4)
 
         self.status = QtWidgets.QLabel("")
         self.status.setWordWrap(True)
@@ -346,7 +362,7 @@ class TrainingGUI(QtWidgets.QWidget):
         lay.addWidget(self.advice)
 
         row = QtWidgets.QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(5)
         # Checkboxes, not a text field. This used to be a QLineEdit whose placeholder read "all",
         # which is exactly what someone types into it -- and `CUDA_VISIBLE_DEVICES=all` is not a
         # device list, so torch reported zero GPUs and trained a 2B model on the CPU without one
@@ -384,7 +400,7 @@ class TrainingGUI(QtWidgets.QWidget):
             "accumulation before adding GPUs.")
         row.addWidget(self.proc_label)
 
-        row.addSpacing(16)
+        row.addSpacing(6)
         self.audit_btn = make_btn("Audit dataset", self._audit)
         self.audit_btn.setToolTip(
             "Prints the source-size percentile table and proposes a resolution ladder. Reads image "
@@ -396,6 +412,13 @@ class TrainingGUI(QtWidgets.QWidget):
         self.cache_dry_btn = make_btn("Cache (dry run)", lambda: self._cache(dry=True))
         self.cache_dry_btn.setToolTip("Report the bucket plan and cache size; write nothing.")
         row.addWidget(self.cache_dry_btn)
+
+        # Keep preparation/GPU controls separate from actions so neither row
+        # forces a laptop-sized window beyond the desktop width.
+        row.addStretch(1)
+        lay.addLayout(row)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(5)
 
         row.addStretch(1)
         self.pipeline_chk = QtWidgets.QCheckBox("Paired run + merge")
@@ -648,6 +671,7 @@ class TrainingGUI(QtWidgets.QWidget):
         finally:
             self._applying = False
         self._last_resolution_enabled = bool(flat.get('resolution_schedule.enabled'))
+        self._last_resolution_unit = flat.get('resolution_schedule.unit', 'steps')
         self._last_optimizer_kind = flat.get("optimizer.kind")
         self._last_adapter_selection = (flat.get("adapter.kind"), flat.get("adapter.lycoris_algo"))
         self._lock_quant_preset()
@@ -808,6 +832,7 @@ class TrainingGUI(QtWidgets.QWidget):
         flat = self.collect()
         previous = dict(flat)
         previous['resolution_schedule.enabled'] = getattr(self, '_last_resolution_enabled', False)
+        previous['resolution_schedule.unit'] = getattr(self, '_last_resolution_unit', 'steps')
         previous['optimizer.kind'] = getattr(self, '_last_optimizer_kind', flat.get('optimizer.kind'))
         previous['adapter.kind'], previous['adapter.lycoris_algo'] = getattr(self, '_last_adapter_selection', (None, None))
         for key, value in zip(('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'),
@@ -822,6 +847,7 @@ class TrainingGUI(QtWidgets.QWidget):
         finally:
             self._applying = False
         self._last_resolution_enabled = bool(normalized.get('resolution_schedule.enabled'))
+        self._last_resolution_unit = normalized.get('resolution_schedule.unit', 'steps')
         self._last_optimizer_kind = normalized.get('optimizer.kind')
         self._last_adapter_selection = (normalized.get('adapter.kind'), normalized.get('adapter.lycoris_algo'))
         self._last_flow_selection = tuple(normalized.get(k) for k in
@@ -837,10 +863,10 @@ class TrainingGUI(QtWidgets.QWidget):
     def _refresh(self):
         flat = self.collect()
         staged = bool(flat.get('resolution_schedule.enabled'))
-        epoch_mode = flat.get('resolution_schedule.unit') == 'epochs'
+        epoch_mode = flat.get('resolution_schedule.unit') in ('epochs', 'stage_epochs')
         for key in ('train.epochs', 'train.save_every_epochs'):
             for widget in self.rows.get(key, ()):
-                widget.setVisible(not staged or epoch_mode)
+                widget.setVisible(not staged or (epoch_mode and (key != 'train.epochs' or flat.get('resolution_schedule.unit') == 'epochs')))
         for widget in self.rows.get('train.max_steps', ()):
             widget.setVisible(not staged or not epoch_mode)
         for widget in self.rows.get('dataset.num_repeats', ()):
@@ -848,6 +874,7 @@ class TrainingGUI(QtWidgets.QWidget):
         self.editors['resolution_schedule.stages'].preview(
             flat.get('train.epochs' if epoch_mode else 'train.max_steps'), flat.get('train.batch_size'), self.num_processes(),
             flat.get('train.gradient_accumulation_steps', 1), flat.get('resolution_schedule.unit', 'steps'))
+        self.editors['resolution_schedule.stages'].set_exposure_context(flat, self.num_processes())
         windows = sys.platform == "win32"
         attention = self.editors["train.attention_backend"]
         item = attention.widget.model().item(attention.values.index("torch_varlen"))

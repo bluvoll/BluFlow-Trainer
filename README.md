@@ -554,7 +554,7 @@ including those not selected in the first epoch.
 
 [Staged MOSS preset](configs/moss-image-lora-staged.toml) trains one resolution tier
 at a time, with its own per-GPU batch size. It supports PEFT LoRA and LyCORIS
-LoCon, cached latents, and packed varlen attention. Choose **Steps** or **Epochs**
+LoCon, cached latents, and packed varlen attention. Choose **Steps**, **Epochs**, or **Epochs per stage**
 in Stage duration. Steps remain the default: `train.max_steps` counts successful
 optimizer updates, and epoch settings are omitted. Existing non-staged runs are unchanged.
 
@@ -585,11 +585,61 @@ per-tier batch sizes, GPU count, and gradient accumulation. `save_every_epochs`
 uses cumulative run epochs. Epoch mode ignores `train.max_steps`; the explicit
 CLI `--max-steps` override selects step mode.
 
+For direct control of dataset exposure, choose **Epochs per stage**:
+
+```toml
+[resolution_schedule]
+enabled = true
+unit = "stage_epochs"
+stages = [
+  {resolution = 512, epochs = 0.5, lr_mul = 0.8},
+  {resolution = 768, epochs = 1.5, lr_mul = 0.9},
+  {resolution = 1024, epochs = 3.0, lr_mul = 1.0},
+]
+```
+
+These are illustrative durations, not quality recommendations. Enter a positive
+duration on every stage and omit `share`. Global `train.epochs` and `max_steps`
+are ignored; the GUIs omit them when saving. Switching from step shares starts at
+one epoch per stage because update percentages cannot determine dataset passes
+without a scan; review the durations before starting. Switching from epoch shares
+preserves their rounded epoch allocations. `--max-steps` cannot override this mode.
+
+An epoch is a traversal of that tier's **weighted dataset**, including repeats and
+target-image weighting. A duration of 1.5 means a complete shuffled pass followed
+by half of the next shuffled pass, rounded up to a whole image. Single-GPU training
+keeps the final partial batch. DDP fills the final batch on every rank by repeating
+samples; very small datasets can therefore receive materially more presentations
+than the requested duration. Accumulation flushes at each complete or partial pass
+boundary, using the actual sample count to normalize gradients. Updates are derived
+from those boundaries; optimizer state and the LR scheduler continue across stages.
+`save_every_epochs` counts completed passes, including a fractional tail as one
+completed pass. Use stage-boundary saves when that is easier to track.
+
+Both GUIs provide **Calculate dataset exposure** under the stages table. It reads
+cached dataset entries without loading a model and shows batch/GPU, effective
+batch, weighted entries, actual planned presentations, equivalent dataset passes,
+optimizer updates, LR multipliers, and warnings about DDP padding or uneven exposure.
+Recalculate after changing settings or dataset files. The same read-only preview is
+available from the CLI:
+
+```bash
+python -m trainer.tools.stage_plan configs/moss-image-lora-staged.toml --gpus 2
+```
+
+Training prints the resolved plan and saves it in checkpoint metadata/state. In
+step mode, exposure is `updates × batch/GPU × GPUs × accumulation / weighted entries`;
+adding a GPU increases exposure at a fixed step budget. For example, 90 updates
+with batch 28 on two GPUs and 193 weighted entries means **26.11 dataset passes**.
+Epoch modes keep the requested passes fixed while changing update counts and padding.
+Warnings highlight large effective batches and stages with at least twice another
+stage's exposure; these are planning signals, not automatic overfitting diagnoses.
+
 Packing combines aspect ratios only within the active tier. Shuffled sample
 streams wrap to fill complete batches; repeats and subsets retain their dataset
 weights. Small sources remain eligible at later tiers without forced upscaling,
 reusing identical latent files. Cache all tiers before starting. Shares divide
-updates, not wall-clock time or image exposure.
+updates in step mode or whole epochs in epoch-share mode, never wall-clock time.
 
 The GUI's **LR %** column scales the scheduled LR per stage: 80% at 512, 90% at
 768, and 100% at 1024 in the preset. `lr_mul` must be greater than zero and at

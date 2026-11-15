@@ -8,6 +8,7 @@ import {
 import { ActionsContext } from './actions';
 import { panels } from './Panels';
 import { Dialog, Preferences, UtilityDialog } from './Dialogs';
+import { ConfigPicker } from './ConfigPicker';
 import {
   clearError,
   chooseCategory,
@@ -89,6 +90,7 @@ export default function App() {
     item.api.setActive();
   }, []);
   const resetLayout = useCallback((dock: DockviewApi) => {
+    const compact = window.innerHeight < 800 || window.innerWidth < 1400;
     dock.clear();
     dock.addPanel({
       id: 'settings',
@@ -97,7 +99,7 @@ export default function App() {
       params: { kind: 'settings' },
       renderer: 'always',
       minimumWidth: 380,
-      minimumHeight: 240,
+      minimumHeight: 200,
     });
     dock.addPanel({
       id: 'navigation',
@@ -105,7 +107,7 @@ export default function App() {
       component: 'panel',
       params: { kind: 'navigation' },
       renderer: 'always',
-      initialWidth: 230,
+      initialWidth: compact ? 190 : 230,
       minimumWidth: 180,
       position: { referencePanel: 'settings', direction: 'left' },
     });
@@ -115,7 +117,7 @@ export default function App() {
       component: 'panel',
       params: { kind: 'run' },
       renderer: 'always',
-      initialWidth: 285,
+      initialWidth: compact ? 240 : 285,
       minimumWidth: 230,
       position: { referencePanel: 'settings', direction: 'right' },
     });
@@ -125,8 +127,8 @@ export default function App() {
       component: 'panel',
       params: { kind: 'console' },
       renderer: 'always',
-      initialHeight: 220,
-      minimumHeight: 130,
+      initialHeight: compact ? 140 : 220,
+      minimumHeight: 96,
       position: { referencePanel: 'settings', direction: 'below' },
     });
     dock.addPanel({
@@ -362,20 +364,11 @@ export default function App() {
       <div className="app" data-testid="app">
         <header className="app-toolbar">
           <div className="config-actions">
-            <select
-              aria-label="Configuration preset"
-              value={state.path || ''}
-              onChange={(e) => void command('config.open', { path: e.target.value }).catch(error)}
-            >
-              <option value="" disabled>
-                Unsaved recipe
-              </option>
-              {state.presets.map((p) => (
-                <option value={p.path} key={p.path}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+            <ConfigPicker
+              presets={state.presets}
+              path={state.path}
+              onSelect={(path) => void command('config.open', { path }).catch(error)}
+            />
             <button onClick={() => void open()}>Open</button>
             <button onClick={() => void save().catch(error)}>Save</button>
             <button onClick={() => void saveAs()}>Save As</button>

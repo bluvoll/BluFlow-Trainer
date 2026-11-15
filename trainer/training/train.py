@@ -331,7 +331,7 @@ class Trainer:
             from ..data.staged import StagedBatchSampler
             self.sampler = StagedBatchSampler(
                 self.dataset, cfg.train.batch_size, cfg.resolution_schedule,
-                cfg.train.epochs if cfg.resolution_schedule.unit == 'epochs' else cfg.train.max_steps,
+                cfg.train.epochs if cfg.resolution_schedule.epoch_based else cfg.train.max_steps,
                 seed=cfg.train.seed, rank=self.accelerator.process_index,
                 world=self.accelerator.num_processes, accumulation=cfg.train.gradient_accumulation_steps)
             self.stage_index = -1
@@ -1012,15 +1012,15 @@ class Trainer:
                         loader.end()
             return
         from ..data.packed import collate_native
-        if cfg.resolution_schedule.unit == 'epochs':
+        if cfg.resolution_schedule.epoch_based:
             from accelerate.data_loader import DataLoaderShard
-            for stage, epochs in enumerate(self.sampler.epoch_budgets):
-                first = sum(self.sampler.epoch_budgets[:stage])
+            for stage, epochs in enumerate(self.sampler.epoch_counts):
+                first = sum(self.sampler.epoch_counts[:stage])
                 for epoch in range(first, first + epochs):
                     if stage < self.stage_index or (stage == self.stage_index and epoch < self.stage_epoch):
                         continue
                     cursor = self.stage_cursor if stage == self.stage_index and epoch == self.stage_epoch else 0
-                    if cursor >= self.sampler.epoch_batches[stage]:
+                    if cursor >= self.sampler.epoch_batch_count(stage, epoch):
                         continue
                     self.stage_index, self.stage_epoch, self.stage_cursor = stage, epoch, cursor
                     self.sampler.configure_epoch(stage, epoch, cursor)
@@ -1064,10 +1064,10 @@ class Trainer:
         if not self.cfg.resolution_schedule.enabled:
             return None
         state = dict(identity=self.sampler.identity, stage=self.stage_index, cursor=self.stage_cursor,
-                    images=self.stage_images, attempts=self.stage_attempts,
+                    images=self.stage_images, attempts=self.stage_attempts, plan=self.sampler.plan,
                     lr_multipliers=[s.lr_mul for s in self.cfg.resolution_schedule.stages])
-        if self.cfg.resolution_schedule.unit == 'epochs':
-            state.update(version=2, unit='epochs', epoch=self.stage_epoch)
+        if self.cfg.resolution_schedule.epoch_based:
+            state.update(version=2, unit=self.cfg.resolution_schedule.unit, epoch=self.stage_epoch)
         return state
 
     def _sampling_state(self):
@@ -1217,7 +1217,7 @@ class Trainer:
                     done = True
                     break
 
-            if (not cfg.resolution_schedule.enabled or cfg.resolution_schedule.unit == 'epochs') and cfg.train.save_every_epochs and (epoch + 1) % cfg.train.save_every_epochs == 0:
+            if (not cfg.resolution_schedule.enabled or cfg.resolution_schedule.epoch_based) and cfg.train.save_every_epochs and (epoch + 1) % cfg.train.save_every_epochs == 0:
                 self.save(f"epoch{epoch + 1:03d}")
             if done:
                 break
@@ -1349,10 +1349,10 @@ class Trainer:
                         lr_mul=self.cfg.resolution_schedule.stages[stage].lr_mul,
                         effective_batch=self.cfg.train.batch_size[self.cfg.resolution_schedule.stages[stage].resolution]
                         * acc.num_processes * self.cfg.train.gradient_accumulation_steps)
-            if self.cfg.resolution_schedule.unit == 'epochs':
-                first = sum(self.sampler.epoch_budgets[:stage])
-                info.update(unit='epochs', epoch=self.stage_epoch + 1,
-                            stage_epoch=self.stage_epoch - first + 1,
+            if self.cfg.resolution_schedule.epoch_based:
+                first = sum(self.sampler.epoch_counts[:stage])
+                info.update(unit=self.cfg.resolution_schedule.unit, epoch=self.stage_epoch + 1,
+                            stage_epoch=min(self.stage_epoch - first + 1, self.sampler.epoch_budgets[stage]),
                             epochs=self.sampler.epoch_budgets[stage])
             _emit(self, 'BLUFLOW_STAGE ' + json.dumps(info))
 
@@ -1405,10 +1405,12 @@ class Trainer:
             if summary:
                 print(summary)
         if cfg.resolution_schedule.enabled:
-            clock = 'planned updates' if cfg.resolution_schedule.unit == 'epochs' else 'successful updates'
+            clock = 'planned updates' if cfg.resolution_schedule.epoch_based else 'successful updates'
             print(f"steps    {self.total_steps} {clock}, {self.accelerator.num_processes} process(es)")
+            from .stage_plan import format_stage_plan
+            print(format_stage_plan(self.sampler.plan))
             for i, (stage, budget) in enumerate(zip(cfg.resolution_schedule.stages, self.sampler.budgets)):
-                duration = f'{self.sampler.epoch_budgets[i]} epochs, ' if cfg.resolution_schedule.unit == 'epochs' else ''
+                duration = f'{self.sampler.epoch_budgets[i]} epochs, ' if cfg.resolution_schedule.epoch_based else ''
                 print(f"         stage {i + 1}: {stage.resolution}px, {duration}{budget} updates, batch/GPU {cfg.train.batch_size[stage.resolution]}, LR x{stage.lr_mul:g}")
         else:
             print(f"steps    {self.total_steps} total, {self.steps_per_epoch}/epoch, "
@@ -1789,7 +1791,7 @@ class Trainer:
         if self.cfg.resolution_schedule.enabled:
             self.start_epoch = self.resume_skip_batches = 0
             self._micro = self.global_step * self.cfg.train.gradient_accumulation_steps
-            unit = 'planned update' if self.cfg.resolution_schedule.unit == 'epochs' else 'successful update'
+            unit = 'planned update' if self.cfg.resolution_schedule.epoch_based else 'successful update'
             self.accelerator.print(f'resumed at {unit} {self.global_step}; staged data cursor {self.stage_cursor}')
             return
         if sampling:
@@ -1814,6 +1816,8 @@ def main() -> None:
 
     cfg = load_config(args.config)
     if args.max_steps is not None:
+        if cfg.resolution_schedule.enabled and cfg.resolution_schedule.unit == 'stage_epochs':
+            ap.error('--max-steps cannot override explicit stage epochs; choose a step-share plan instead')
         cfg.train.max_steps = args.max_steps
         cfg.resolution_schedule.unit = 'steps'
     if args.dry_run:
@@ -1821,7 +1825,7 @@ def main() -> None:
             count = len(cfg.resolution_schedule.stages)
             cfg.train.max_steps = count
             cfg.resolution_schedule.unit = 'steps'
-            cfg.resolution_schedule.stages = [replace(s, share=1 / count) for s in cfg.resolution_schedule.stages]
+            cfg.resolution_schedule.stages = [replace(s, share=1 / count, epochs=None) for s in cfg.resolution_schedule.stages]
         else:
             cfg.train.max_steps = 1
             cfg.train.epochs = 1

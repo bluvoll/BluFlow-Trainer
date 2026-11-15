@@ -559,6 +559,8 @@ class CollapsibleGroupBox(QtWidgets.QGroupBox):
         super().__init__()
         self.setProperty("collapsible", True)
         outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(2)
         self.header = QtWidgets.QToolButton()
         self.header.setText(title)
         self.header.setCheckable(True)
@@ -593,6 +595,9 @@ def group_box(title, layout_type=QtWidgets.QVBoxLayout, role="nested", *, collap
     else:
         set_semantic_color(gb, "raw")
     lay = layout_type(gb.content if collapsible else gb)
+    if collapsible:
+        lay.setContentsMargins(4, 2, 4, 4)
+        lay.setSpacing(4)
     return gb, lay
 
 def form_row(layout, label_text, widget, tooltip=None):

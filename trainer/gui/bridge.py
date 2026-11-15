@@ -234,6 +234,8 @@ def prune_defaults(flat: dict) -> dict:
             out.pop('train.save_every_epochs', None)
         else:
             out.pop('train.max_steps', None)
+            if flat.get('resolution_schedule.unit') == 'stage_epochs':
+                out.pop('train.epochs', None)
     if flat.get('dataset.target_images') is not None:
         out.pop('dataset.num_repeats', None)
     return out
@@ -315,7 +317,8 @@ def summarize(flat: dict) -> str:
     bits = [mode, f"{'/'.join(str(t) for t in tiers)}px"]
 
     if flat.get('resolution_schedule.enabled'):
-        duration = (f"{flat.get('train.epochs')} epochs" if flat.get('resolution_schedule.unit') == 'epochs'
+        duration = ('explicit epochs per stage' if flat.get('resolution_schedule.unit') == 'stage_epochs'
+                    else f"{flat.get('train.epochs')} epochs" if flat.get('resolution_schedule.unit') == 'epochs'
                     else f"{flat.get('train.max_steps')} successful updates")
         bits.append(f"{duration} / staged resolutions")
     # Whether a run crops is decided by the curriculum, which lives in a table on another tab --
@@ -411,9 +414,16 @@ def advisories(flat: dict, num_processes: int = 1) -> list[tuple[str, str]]:
                         (f"{n} GPUs with a texture curriculum, override ON. This configuration "
                         f"produced progressively worsening anatomy twice. You are re-testing an "
                         f"unproven fix -- compare against a single-GPU run at matched steps.")))
-        out.append(("note",
-                    (f"{n} GPUs means {n}x FEWER optimizer steps than the same config on one, at "
-                    f"{n}x the effective batch. Multiply epochs by {n} to match a single-GPU run.")))
+        if flat.get('resolution_schedule.enabled'):
+            message = (f'{n} GPUs multiply presentations by {n} at a fixed staged step budget. '
+                       if flat.get('resolution_schedule.unit', 'steps') == 'steps' else
+                       f'{n} GPUs keep requested stage epochs fixed; update counts and final-batch padding change. '
+                       'Increasing epochs increases dataset exposure. ')
+            out.append(('note', message + 'Calculate dataset exposure before starting.'))
+        else:
+            out.append(("note",
+                        (f"{n} GPUs means {n}x FEWER optimizer steps than the same config on one, at "
+                        f"{n}x the effective batch. Multiply epochs by {n} to match a single-GPU run.")))
 
     if tex:
         bs = flat.get("train.batch_size", 1)

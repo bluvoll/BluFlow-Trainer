@@ -124,7 +124,7 @@ QGroupBox[semanticColor="transformed"]:disabled::title {{ color: {t.text_disable
 
 QPushButton {{
     background: {t.surface_raised}; border: 1px solid {t.border}; border-radius: 4px;
-    color: {t.text}; padding: 6px 14px; min-height: 28px; max-height: 36px;
+    color: {t.text}; padding: 4px 9px; min-height: 20px; max-height: 32px;
 }}
 QPushButton:hover {{ border-color: {t.accent}; color: {t.accent}; }}
 QPushButton:pressed, QPushButton:checked {{ background: {t.accent_deep}; border-color: {t.accent_deep}; color: white; }}
@@ -157,7 +157,7 @@ QPushButton[uiRole="warning"]:hover {{ background: {t.warning}; color: {t.window
 
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     background: {t.surface_raised}; border: 1px solid {t.border}; border-radius: 4px;
-    padding: 5px 8px; color: {t.text};
+    padding: 3px 6px; color: {t.text};
 }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:on,
 QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {t.accent}; }}
@@ -173,14 +173,14 @@ QTextEdit[uiRole="caption"] {{ background: transparent; border: none; font-size:
 /* `combobox-popup: 0` makes the popup a plain scrolling list view, which is what makes
    QComboBox.setMaxVisibleItems() take effect -- the default native-style popup ignores it and
    grows to the full item count. */
-QComboBox {{ min-height: 28px; max-height: 36px; combobox-popup: 0; }}
+QComboBox {{ min-height: 20px; max-height: 30px; combobox-popup: 0; }}
 QComboBox::drop-down {{ border-left: 1px solid {t.border}; width: 20px; }}
 QComboBox QLineEdit {{ background: transparent; border: none; padding: 0; }}
 QComboBox QAbstractItemView {{ background: {t.surface_raised}; border: 1px solid {t.accent}; selection-background-color: {t.accent}; outline: none; }}
 QComboBox QAbstractItemView::item {{ min-height: 24px; padding: 2px 6px; }}
 QComboBox[semanticColor="raw"] QAbstractItemView {{ border-color: {t.accent_alt}; selection-background-color: {t.accent_alt}; }}
 QComboBox[semanticColor="transformed"] QAbstractItemView {{ border-color: {t.warning}; selection-background-color: {t.warning}; }}
-QSpinBox, QDoubleSpinBox {{ padding-right: 28px; min-height: 24px; }}
+QSpinBox, QDoubleSpinBox {{ padding-right: 24px; min-height: 20px; }}
 QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button {{
     width: 26px; border-left: 1px solid {t.border}; background: {t.surface_raised};
 }}
@@ -218,7 +218,7 @@ QSlider[semanticColor="transformed"]::sub-page:horizontal:disabled {{ background
 QLabel:disabled {{ color: {t.text_disabled}; }}
 #TitleLabel {{ color: {t.accent}; font-size: 20pt; font-weight: bold; padding: 12px; border-bottom: 1px solid {t.border}; }}
 QTabWidget::pane {{ border: 1px solid {t.border}; border-top: none; }}
-QTabBar::tab {{ background: {t.window}; border: 1px solid {t.border}; border-bottom: none; border-radius: 4px 4px 0 0; padding: 8px 18px; color: {t.text_muted}; font-weight: bold; min-height: 36px; }}
+QTabBar::tab {{ background: {t.window}; border: 1px solid {t.border}; border-bottom: none; border-radius: 4px 4px 0 0; padding: 5px 10px; color: {t.text_muted}; font-weight: bold; min-height: 24px; }}
 QTabBar::tab:selected {{ background: {t.surface_raised}; color: {t.accent}; border-bottom: 2px solid {t.accent}; }}
 QTabBar::tab:!selected:hover {{ background: {t.surface_hover}; color: {t.text}; }}
 QScrollArea {{ border: none; }}

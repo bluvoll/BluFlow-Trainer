@@ -80,7 +80,11 @@ declare global {
       preferences(patch?: Presentation): Promise<Presentation>;
       restart(options?: any): Promise<void>;
       snapshot(): Promise<Metrics>;
-      ready(): void;
+      ready(plots?: {
+        charts: { x: number; y: number; width: number; height: number }[];
+        width: number;
+        height: number;
+      }): void;
       onEvent(callback: (event: DesktopEvent) => void): () => void;
     };
   }

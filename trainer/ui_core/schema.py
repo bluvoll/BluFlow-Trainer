@@ -277,7 +277,7 @@ SPEC: dict[str, Spec] = {
     ),
     "resolution_schedule.enabled": _spec(
         "Staged resolutions",
-        "MOSS PEFT LoRA / LyCORIS LoCon with cached latents only. Allocate successful updates or whole dataset epochs between tiers.",
+        "MOSS PEFT LoRA / LyCORIS LoCon with cached latents only. Split updates/epochs by shares, or assign explicit fractional epochs per tier.",
         lambda: F.BoolEditor("Enable staged resolutions"),
         inline_label=True,
     ),
@@ -288,12 +288,12 @@ SPEC: dict[str, Spec] = {
         inline_label=True,
     ),
     "resolution_schedule.unit": _spec(
-        "Stage duration", "Split total steps or whole epochs using the stage shares.",
-        lambda: F.ChoiceEditor(["Steps", "Epochs"], ["steps", "epochs"]),
+        "Stage duration", "Shares split a global budget. Epochs per stage accepts explicit durations such as 0.5 or 2.5; total updates are calculated from the dataset and batching.",
+        lambda: F.ChoiceEditor(["Steps", "Epochs", "Epochs per stage"], ["steps", "epochs", "stage_epochs"]),
     ),
     "resolution_schedule.stages": _spec(
         "Resolution stages",
-        "Shares must total 100%. LR % scales the current scheduled LR (80 = 20% penalty); warmup and decay continue. Stage tiers must match Dataset resolutions; set per-tier batch sizes in Batching. Packing stays within each stage.",
+        "Shares must total 100%; explicit epochs must be positive and can be fractional. An epoch traverses the tier after repeats/weighting. Calculate exposure to see actual presentations including DDP padding. LR % scales the current scheduled LR; warmup and decay continue. Stage tiers must match Dataset resolutions and per-tier batch sizes.",
         lambda: F.ResolutionStagesEditor(),
     ),
     "train.pack_resolutions": _spec(

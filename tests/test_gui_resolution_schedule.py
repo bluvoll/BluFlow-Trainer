@@ -133,3 +133,31 @@ def test_subset_weight_switch_round_trip():
     assert editor.get()[0] == rows[0]
     editor.widget.deleteLater()
     app.processEvents()
+
+
+def test_explicit_stage_epochs_gui(gui, tmp_path):
+    from trainer.training.config import load_config
+    gui._apply(bridge.defaults() | {
+        'dataset.path': '/images', 'dataset.source': 'latents', 'train.model_family': 'moss_image',
+        'adapter.kind': 'lora', 'train.batch_size': 2,
+    })
+    gui.editors['resolution_schedule.enabled'].set(True)
+    gui._on_edit()
+    gui.editors['resolution_schedule.unit'].set('stage_epochs')
+    gui._on_edit()
+    stages = gui.editors['resolution_schedule.stages']
+    assert stages.explicit_epochs
+    assert [s['epochs'] for s in stages.get()] == [1., 1., 1.]
+    stages.table.cellWidget(0, 1).setValue(.5)
+    gui._on_edit()
+    assert stages.get()[0]['epochs'] == .5
+    assert stages.table.horizontalHeaderItem(1).text() == 'Epochs'
+    assert stages.table.item(0, 4).text() == '0.5'
+    assert all(w.isHidden() for w in gui.rows['train.max_steps'])
+    assert all(w.isHidden() for w in gui.rows['train.epochs'])
+    assert not any(w.isHidden() for w in gui.rows['train.save_every_epochs'])
+    path = tmp_path / 'fractional.toml'
+    bridge.write_toml(path, gui.collect())
+    assert load_config(path).resolution_schedule.budgets(None) == [.5, 1., 1.]
+    gui._apply(bridge.defaults() | bridge.flatten(bridge.read_toml(path)))
+    assert stages.get()[0]['epochs'] == .5

@@ -1049,9 +1049,13 @@ class BlockLRRangesEditor(_Blockable):
 
 class ResolutionStagesEditor(_Blockable):
     """Stage shares plus a read-only preview of batches and resolved update counts."""
+    exposure_ready = QtCore.Signal(str, str)
     def __init__(self):
         box = QtWidgets.QWidget()
         super().__init__(box)
+        self.explicit_epochs = False
+        self.exposure_context = None
+        self.exposure_key = None
         layout = QtWidgets.QVBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
         self.table = QtWidgets.QTableWidget(0, 6)
@@ -1067,9 +1071,50 @@ class ResolutionStagesEditor(_Blockable):
         self.summary = QtWidgets.QLabel('Set total steps and per-tier batch sizes to preview.')
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
+        self.exposure_button = QtWidgets.QPushButton('Calculate dataset exposure')
+        self.exposure_button.clicked.connect(self._scan_exposure)
+        layout.addWidget(self.exposure_button)
+        self.exposure_text = QtWidgets.QPlainTextEdit()
+        self.exposure_text.setReadOnly(True)
+        self.exposure_text.setMaximumHeight(240)
+        self.exposure_text.setPlaceholderText('Reads cached entries, including repeats. Recalculate after changing files or settings.')
+        layout.addWidget(self.exposure_text)
+        self.exposure_ready.connect(self._show_exposure)
+
+    def set_exposure_context(self, flat, world):
+        import copy
+        key = repr((flat, world))
+        self.exposure_context = (copy.deepcopy(flat), world, key)
+        if self.exposure_key is not None and key != self.exposure_key:
+            self.exposure_text.setPlainText('Settings changed. Recalculate the exposure plan.')
+
+    def _scan_exposure(self):
+        import threading
+        from ..ui_core.stage_preview import preview_stages
+        if self.exposure_context is None:
+            return
+        flat, world, key = self.exposure_context
+        self.exposure_button.setEnabled(False)
+        self.exposure_text.setPlainText('Scanning dataset…')
+        def work():
+            try:
+                text = preview_stages(flat, world)['text']
+            except Exception as exc:
+                text = str(exc)
+            try:
+                self.exposure_ready.emit(text, key)
+            except RuntimeError:
+                pass  # The window was closed while the read-only scan finished.
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_exposure(self, text, key):
+        self.exposure_button.setEnabled(True)
+        self.exposure_key = key
+        self.exposure_text.setPlainText(text if self.exposure_context[2] == key
+                                       else 'Settings changed. Recalculate the exposure plan.')
 
     def _add(self, *_):
-        self.set(self.get() + [dict(resolution=1024, share=0.2)])
+        self.set(self.get() + [dict(resolution=1024, **({'epochs': 1.} if self.explicit_epochs else {'share': .2}))])
         self._emit()
 
     def _remove(self):
@@ -1079,6 +1124,8 @@ class ResolutionStagesEditor(_Blockable):
             self._emit()
 
     def _set(self, value):
+        self.explicit_epochs = any(s.get('epochs') is not None for s in value or [])
+        self.table.horizontalHeaderItem(1).setText('Epochs' if self.explicit_epochs else 'Share %')
         self.table.setRowCount(0)
         for stage in value or []:
             row = self.table.rowCount()
@@ -1088,9 +1135,9 @@ class ResolutionStagesEditor(_Blockable):
             resolution.setSingleStep(64)
             resolution.setValue(stage['resolution'])
             share = NoScrollDoubleSpinBox()
-            share.setRange(0, 100)
+            share.setRange(0, 1000000 if self.explicit_epochs else 100)
             share.setDecimals(4)
-            share.setValue(stage['share'] * 100)
+            share.setValue(stage.get('epochs', 1.) if self.explicit_epochs else (stage.get('share') or 0) * 100)
             lr = NoScrollDoubleSpinBox()
             lr.setDecimals(4)
             lr.setRange(0.0001, 100)
@@ -1102,7 +1149,8 @@ class ResolutionStagesEditor(_Blockable):
 
     def get(self):
         return [dict(resolution=self.table.cellWidget(r, 0).value(),
-                     share=self.table.cellWidget(r, 1).value() / 100,
+                     **({'epochs': self.table.cellWidget(r, 1).value()} if self.explicit_epochs else
+                        {'share': self.table.cellWidget(r, 1).value() / 100}),
                      lr_mul=self.table.cellWidget(r, 2).value() / 100)
                 for r in range(self.table.rowCount())]
 
@@ -1111,7 +1159,7 @@ class ResolutionStagesEditor(_Blockable):
         try:
             stages = self.get()
             budgets = ResolutionSchedule(enabled=True, stages=stages, unit=unit).budgets(total)
-            self.table.horizontalHeaderItem(4).setText('Epochs' if unit == 'epochs' else 'Updates')
+            self.table.horizontalHeaderItem(4).setText('Epochs' if unit != 'steps' else 'Updates')
             if not isinstance(batches, dict):
                 raise ValueError('Use a per-tier batch size map in Batching')
             for row, (stage, budget) in enumerate(zip(stages, budgets)):
@@ -1122,7 +1170,9 @@ class ResolutionStagesEditor(_Blockable):
                     item = QtWidgets.QTableWidgetItem(str(value))
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
                     self.table.setItem(row, col, item)
-            self.summary.setText(f'{total} dataset epochs; skipped updates do not extend a stage.' if unit == 'epochs'
+            self.summary.setText(f'{sum(budgets):g} dataset epochs; skipped updates do not extend a stage. '
+                                 'Explicit durations allow fractions. Step-share conversion starts at 1 epoch per stage; review durations.' if unit == 'stage_epochs'
+                                 else f'{total} dataset epochs; skipped updates do not extend a stage.' if unit == 'epochs'
                                  else f'{total} successful updates; skipped attempts do not consume the budget.')
         except (ValueError, TypeError) as exc:
             for row in range(self.table.rowCount()):

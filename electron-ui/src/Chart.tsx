@@ -163,9 +163,11 @@ export default function Chart({
           top + h / 2,
         );
       }
+      canvas.dataset.rendered = 'true';
     };
     let frame = 0;
     const schedule = () => {
+      delete canvas.dataset.rendered;
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(draw);
     };
@@ -195,6 +197,7 @@ export default function Chart({
     canvas.addEventListener('wheel', wheel, { passive: false });
     return () => {
       observer.disconnect();
+      delete canvas.dataset.rendered;
       cancelAnimationFrame(frame);
       canvas.removeEventListener('wheel', wheel);
     };

@@ -47,8 +47,14 @@ def recover_settings(source):
     else:
         dataset.pop('subsets', None)
     if config.get('resolution_schedule', {}).get('enabled'):
-        train.pop('epochs', None)
-        train.pop('save_every_epochs', None)
+        unit = config['resolution_schedule'].get('unit', 'steps')
+        if unit == 'steps':
+            train.pop('epochs', None)
+            train.pop('save_every_epochs', None)
+        else:
+            train.pop('max_steps', None)
+            if unit == 'stage_epochs':
+                train.pop('epochs', None)
     if any(key in metadata for key in (
             'bluflow_rank_resize', 'inference_conversion', 'ss_dora_baked_weight')):
         notes.append('This adapter was edited after training. Recovered settings describe '

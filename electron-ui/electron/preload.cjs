@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('bluflow', {
   preferences: (patch) => ipcRenderer.invoke('bluflow:presentation', patch),
   restart: (options) => ipcRenderer.invoke('bluflow:restart', options),
   snapshot: () => ipcRenderer.invoke('bluflow:snapshot'),
-  ready: () => ipcRenderer.send('bluflow:ready'),
+  ready: (plots) => ipcRenderer.send('bluflow:ready', plots),
   onEvent: (callback) => {
     const listener = (_, event) => callback(event);
     ipcRenderer.on('bluflow:event', listener);

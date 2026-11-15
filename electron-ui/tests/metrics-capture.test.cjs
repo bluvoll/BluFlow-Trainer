@@ -33,3 +33,28 @@ test('closing the capture window rejects and removes paint listeners', async () 
   await assert.rejects(captureMetricsPng(contents), /closed before capture/);
   assert.equal(contents.listenerCount('paint'), 0);
 });
+
+const plots = {
+  width: 100,
+  height: 100,
+  charts: [0, 1, 2, 3].map((i) => ({ x: i * 20, y: 10, width: 20, height: 70 })),
+};
+const withGraphs = (count) => ({
+  ...rendered,
+  getSize: () => ({ width: 100, height: 100 }),
+  crop: (rect) => (Math.floor(rect.x / 20) < count ? rendered : blank),
+});
+
+test('headings or three graphs are insufficient: all four plots must paint', async () => {
+  const contents = new EventEmitter();
+  let paints = 0;
+  contents.invalidate = () => contents.emit('paint', {}, {}, withGraphs(Math.min(4, paints++)));
+  assert.equal((await captureMetricsPng(contents, 1000, plots)).toString(), 'rendered PNG');
+  assert.equal(paints, 5);
+});
+
+test('a permanently missing graph fails instead of saving an incomplete screenshot', async () => {
+  const contents = new EventEmitter();
+  contents.invalidate = () => contents.emit('paint', {}, {}, withGraphs(3));
+  await assert.rejects(captureMetricsPng(contents, 25, plots), /every graph/);
+});

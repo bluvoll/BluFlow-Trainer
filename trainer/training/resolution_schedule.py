@@ -1,4 +1,4 @@
-"""Whole-unit budgets for staged-resolution MOSS adapters."""
+"""Update shares, whole-epoch shares, and explicit epochs for staged MOSS adapters."""
 from dataclasses import dataclass, field
 import math
 
@@ -6,14 +6,17 @@ import math
 @dataclass
 class ResolutionStage:
     resolution: int
-    share: float
+    share: float | None = None
     lr_mul: float = 1.0
+    epochs: float | None = None
 
     def __post_init__(self):
         if type(self.resolution) is not int or self.resolution <= 0:
             raise ValueError('Stage resolution must be a positive integer')
-        if not math.isfinite(self.share) or self.share <= 0:
+        if self.share is not None and (isinstance(self.share, bool) or not math.isfinite(self.share) or self.share <= 0):
             raise ValueError('Stage share must be finite and positive')
+        if self.epochs is not None and (isinstance(self.epochs, bool) or not math.isfinite(self.epochs) or self.epochs <= 0):
+            raise ValueError('Stage epochs must be finite and positive')
         if isinstance(self.lr_mul, bool) or not math.isfinite(self.lr_mul) or not 0 < self.lr_mul <= 1:
             raise ValueError('Stage lr_mul must be finite and in (0, 1]')
 
@@ -26,20 +29,34 @@ class ResolutionSchedule:
     unit: str = 'steps'
 
     def __post_init__(self):
-        if self.unit not in ('steps', 'epochs'):
-            raise ValueError('resolution_schedule.unit must be steps or epochs')
+        if self.unit not in ('steps', 'epochs', 'stage_epochs'):
+            raise ValueError('resolution_schedule.unit must be steps, epochs or stage_epochs')
         if type(self.enabled) is not bool or type(self.save_stage_end) is not bool:
             raise ValueError('Resolution schedule enabled/save_stage_end must be booleans')
         self.stages = [ResolutionStage(**s) if isinstance(s, dict) else s for s in self.stages]
         if not all(isinstance(s, ResolutionStage) for s in self.stages):
             raise ValueError('resolution_schedule.stages must contain resolution/share tables')
         if self.enabled:
-            if not self.stages or not math.isclose(sum(s.share for s in self.stages), 1, abs_tol=1e-9):
-                raise ValueError('Resolution stage shares must sum to 1')
+            self._validate_durations()
             if len({s.resolution for s in self.stages}) != len(self.stages):
                 raise ValueError('Each resolution must appear once in the stage plan')
 
+    @property
+    def epoch_based(self):
+        return self.unit in ('epochs', 'stage_epochs')
+
+    def _validate_durations(self):
+        if self.unit == 'stage_epochs':
+            if not self.stages or any(s.epochs is None or s.share is not None for s in self.stages):
+                raise ValueError('Explicit stage epochs require epochs on every stage and no shares')
+        elif (not self.stages or any(s.share is None or s.epochs is not None for s in self.stages)
+              or not math.isclose(sum(s.share for s in self.stages), 1, abs_tol=1e-9)):
+            raise ValueError('Resolution stage shares must sum to 1; use stage_epochs for explicit durations')
+
     def budgets(self, steps):
+        self._validate_durations()
+        if self.unit == 'stage_epochs':
+            return [s.epochs for s in self.stages]
         if type(steps) is not int or steps <= 0:
             raise ValueError(f'Staged resolution training requires a positive train.{"epochs" if self.unit == "epochs" else "max_steps"}')
         exact = [steps * s.share / sum(p.share for p in self.stages) for s in self.stages]

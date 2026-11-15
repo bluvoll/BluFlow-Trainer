@@ -59,8 +59,9 @@ lr_mul = 0.8
         recover_file(source, source)
 
 
-def test_staged_multires_and_subsets_roundtrip(tmp_path):
-    source, original = checkpoint(tmp_path, '''
+@pytest.mark.parametrize('unit', ['steps', 'epochs', 'stage_epochs'])
+def test_staged_multires_and_subsets_roundtrip(tmp_path, unit):
+    text = '''
 [train]
 model_family = "moss_image"
 max_steps = 560
@@ -79,13 +80,26 @@ path = "images/b"
 [resolution_schedule]
 enabled = true
 stages = [{resolution=512,share=0.2,lr_mul=0.8}, {resolution=768,share=0.2,lr_mul=0.9}, {resolution=1024,share=0.6}]
-''')
+'''
+    if unit != 'steps':
+        text = text.replace('max_steps = 560', 'epochs = 50\nsave_every_epochs = 2')
+        text = text.replace('[resolution_schedule]', f'[resolution_schedule]\nunit = "{unit}"')
+    if unit == 'stage_epochs':
+        text = text.replace('share=0.2', 'epochs=0.5').replace('share=0.6', 'epochs=2.5')
+    source, original = checkpoint(tmp_path, text)
     target, notes = recover_file(source)
     assert notes == []
     raw = tomllib.loads(target.read_text())
     assert 'resolution' not in raw['dataset'] and 'path' not in raw['dataset']
-    assert 'epochs' not in raw['train'] and 'save_every_epochs' not in raw['train']
-    assert json.loads(encode_settings(load_config(target))) == json.loads(encode_settings(original))
+    if unit == 'steps':
+        assert 'epochs' not in raw['train'] and 'save_every_epochs' not in raw['train']
+    else:
+        assert raw['train']['save_every_epochs'] == 2
+    restored = load_config(target)
+    if unit == 'stage_epochs':
+        assert restored.resolution_schedule.budgets(None) == [.5, .5, 2.5]
+    else:
+        assert json.loads(encode_settings(restored)) == json.loads(encode_settings(original))
 
 
 def test_fresh_run_and_edited_adapter_notice(tmp_path, capsys):
