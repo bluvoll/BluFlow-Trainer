@@ -7,10 +7,16 @@ import torch
 
 from trainer.training.block_lr import BlockLRConfig
 from trainer.training.config import Config, load_config, validate_model_options
-from trainer.training.params import AdapterConfig, ComponentLRs, apply_adapter, build_adapter_param_groups
+from trainer.training.params import AdapterConfig, ComponentLRs, apply_adapter, build_adapter_param_groups, build_param_groups
 from trainer.training.optim import build_optimizer, build_scheduler
 from trainer.training.config import OptimizerConfig, ScheduleConfig
 from test_moss_image import tiny, inputs
+
+
+def adapter_config(kind, **kwargs):
+    if kind == 'lycoris_lokr':
+        return AdapterConfig(kind='lycoris_lora', lycoris_algo='lokr', **kwargs)
+    return AdapterConfig(kind=kind, **kwargs)
 
 
 def plan(first=.75, last=1.5):
@@ -45,13 +51,14 @@ def test_disabled_defaults_gaps_and_equivalent_resume():
     BlockLRConfig(True, []).check_resume(None)
 
 
-@pytest.mark.parametrize('kind', ['lora', 'lycoris_lora'])
+@pytest.mark.parametrize('kind', ['none', 'lora', 'lycoris_lora', 'lokr', 'lycoris_lokr'])
 def test_real_adapters_receive_block_and_component_lr_and_updates(kind):
     torch.manual_seed(123)
     model = tiny()
     model.configure_execution(False)
-    apply_adapter(model, AdapterConfig(kind=kind, rank=2, alpha=2, moss_train_text_refiner=True))
-    report = build_adapter_param_groups(model, ComponentLRs(mlp=.02), .01, block_lr=plan())
+    apply_adapter(model, adapter_config(kind, rank=2, alpha=2, moss_train_text_refiner=True))
+    builder = build_param_groups if kind == "none" else build_adapter_param_groups
+    report = builder(model, ComponentLRs(mlp=.02), .01, block_lr=plan())
     # The ordinary optimizer path strips bookkeeping before SDNQ's strict schema.
     came = build_optimizer(report.groups, OptimizerConfig(kind='came', lr=.01))
     assert all('block_lr_mul' not in g and 'component' not in g for g in came.param_groups)
@@ -77,10 +84,10 @@ def test_real_adapters_receive_block_and_component_lr_and_updates(kind):
             torch.testing.assert_close(p, before[id(p)] - rates[id(p)] * gradients[id(p)])
 
 
-@pytest.mark.parametrize('kind', ['lora', 'lycoris_lora'])
+@pytest.mark.parametrize('kind', ['lora', 'lycoris_lora', 'lokr', 'lycoris_lokr'])
 def test_freezing_and_disabled_group_order(kind):
     model = tiny()
-    apply_adapter(model, AdapterConfig(kind=kind, rank=2, alpha=2, moss_train_text_refiner=False))
+    apply_adapter(model, adapter_config(kind, rank=2, alpha=2, moss_train_text_refiner=False))
     baseline = build_adapter_param_groups(model, ComponentLRs(), .001)
     disabled = plan()
     disabled.enabled = False
@@ -94,12 +101,91 @@ def test_freezing_and_disabled_group_order(kind):
         build_adapter_param_groups(model, ComponentLRs(), .001, block_lr=plan(0, 0))
 
 
+def test_full_model_freezes_blocks_and_components_without_weight_decay():
+    model = tiny()
+    baseline = build_param_groups(model, ComponentLRs(), .001)
+    disabled = plan()
+    disabled.enabled = False
+    actual = build_param_groups(model, ComponentLRs(), .001, block_lr=disabled)
+    assert [[id(p) for p in g['params']] for g in actual.groups] == [[id(p) for p in g['params']] for g in baseline.groups]
+    report = build_param_groups(model, ComponentLRs(base=0), .001, weight_decay=.1, block_lr=plan(0, 1.5))
+    from trainer.training.params import classify
+    frozen = {}
+    for name, p in model.named_parameters():
+        should_freeze = name.startswith('layers.0.') or classify(name) == 'base'
+        assert p.requires_grad == (not should_freeze), name
+        if should_freeze:
+            frozen[name] = p.detach().clone()
+    opt = torch.optim.AdamW(report.groups)
+    for p in model.parameters():
+        if p.requires_grad:
+            p.grad = torch.ones_like(p)
+    opt.step()
+    for name, p in model.named_parameters():
+        if name in frozen:
+            torch.testing.assert_close(p, frozen[name], rtol=0, atol=0)
+    with pytest.raises(ValueError, match='nothing to train'):
+        build_param_groups(model, ComponentLRs(image_attn=0, text_attn=0, mlp=0, adaln=0, base=0), .001, block_lr=plan())
+
+
+@pytest.mark.parametrize('factor,rank,decompose_both', [(1, 2, False), (1, 100, False), (4, 100, False), (4, 1, True)])
+@pytest.mark.parametrize('backend,initialization', [('lokr', 'peft'), ('lokr', 'lycoris'), ('lycoris_lokr', 'lycoris')])
+def test_lokr_factors_freeze_update_and_resume(factor, rank, decompose_both, backend, initialization):
+    import copy
+    torch.manual_seed(456)
+    model = tiny()
+    apply_adapter(model, adapter_config(backend, rank=rank, alpha=rank,
+                                      lokr_factor=factor, lokr_decompose_both=decompose_both,
+                                      lokr_init=initialization, moss_train_text_refiner=False))
+    report = build_adapter_param_groups(model, ComponentLRs(mlp=.002), .001,
+                                       weight_decay=.1, block_lr=plan(0, 1.5))
+    rates = {id(p): g['lr'] for g in report.groups for p in g['params']}
+    frozen = {n: p.detach().clone() for n, p in model.named_parameters() if not p.requires_grad}
+    before = {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad}
+    assert any(n.startswith('layers.0.') and '.lokr_' in n for n in frozen)
+    assert before
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            assert name.startswith('layers.1.') and '.lokr_' in name
+            assert rates[id(p)] == pytest.approx(.003 if '.ffn_' in name else .0015)
+        else:
+            assert id(p) not in rates
+    opt = torch.optim.AdamW(report.groups)
+    xs, t, text, mask = inputs()
+    def step():
+        opt.zero_grad(set_to_none=True)
+        loss = sum(y.square().mean() for y in model(xs, t, (text, mask))[0])
+        loss.backward()
+        assert all(p.grad is not None and torch.isfinite(p.grad).all()
+                   for p in model.parameters() if p.requires_grad)
+        opt.step()
+    step()
+    # LyCORIS may return computed tensors (e.g. scaled factors) in state_dict.
+    saved_model = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    saved_opt = copy.deepcopy(opt.state_dict())
+    step()
+    expected = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    model.load_state_dict(saved_model)
+    rebuilt = build_adapter_param_groups(model, ComponentLRs(mlp=.002), .001,
+                                         weight_decay=.1, block_lr=plan(0, 1.5))
+    opt = torch.optim.AdamW(rebuilt.groups)
+    opt.load_state_dict(saved_opt)
+    step()
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(value, expected[key], rtol=0, atol=0)
+    for name, p in model.named_parameters():
+        if name in frozen:
+            torch.testing.assert_close(p, frozen[name], rtol=0, atol=0)
+    assert any(not torch.equal(before[n], p) for n, p in model.named_parameters() if n in before)
+
+
 @pytest.mark.parametrize('schedule', ['constant', 'rex', 'rerex'])
 @pytest.mark.parametrize('staged', [False, True])
-def test_schedule_stage_and_curriculum_multiply_without_compounding(schedule, staged):
+@pytest.mark.parametrize('kind', ['lora', 'lokr', 'lycoris_lokr'])
+def test_schedule_stage_and_curriculum_multiply_without_compounding(schedule, staged, kind):
     from trainer.training.train import Trainer
     model = tiny()
-    apply_adapter(model, AdapterConfig(kind='lora', rank=2, alpha=2))
+    apply_adapter(model, adapter_config(kind, rank=2, alpha=2))
     report = build_adapter_param_groups(model, ComponentLRs(), .01, block_lr=plan())
     opt = torch.optim.SGD(report.groups)
     sched = build_scheduler(opt, ScheduleConfig(kind=schedule, warmup_steps=2), 8)
@@ -121,21 +207,22 @@ def test_schedule_stage_and_curriculum_multiply_without_compounding(schedule, st
         sched.step()
 
 
-@pytest.mark.parametrize('family,kind,algo', [('mage_flow', 'lora', 'locon'), ('moss_image', 'none', 'locon'), ('moss_image', 'lokr', 'locon'), ('moss_image', 'lycoris_lora', 'lokr')])
+@pytest.mark.parametrize('family,kind,algo', [('mage_flow', 'lora', 'locon'), ('mage_flow', 'lokr', 'locon'), ('moss_image', 'lycoris_lora', 'dora')])
 def test_unsupported_modes_rejected(family, kind, algo):
     from trainer.data.dataset import DatasetConfig
     cfg = Config(dataset=DatasetConfig(path='/images'))
     cfg.train.model_family = family
-    cfg.adapter = AdapterConfig(kind=kind, lycoris_algo=algo)
+    cfg.adapter = adapter_config(kind, lycoris_algo=algo)
     cfg.block_lr = plan()
     with pytest.raises(ValueError, match='block LR'):
         validate_model_options(cfg)
 
 
-def test_metadata_recovery_and_full_resume_guard(tmp_path):
+@pytest.mark.parametrize('kind', ['lora', 'none'])
+def test_metadata_recovery_and_full_resume_guard(tmp_path, kind):
     from test_multires_checkpoint_save import make_trainer
     from trainer.tools.recover_config import recover_file
-    trainer = make_trainer(tmp_path, 1, kind='lora')
+    trainer = make_trainer(tmp_path, 1, kind=kind)
     trainer.cfg.block_lr = plan()
     trainer.cfg.train.save_optimizer_state = True
     trainer.flow_rng = NS(version=1)
@@ -159,7 +246,7 @@ def test_bf16_came_cuda_update_and_optimizer_resume(kind):
     torch.manual_seed(42)
     model = tiny().to('cuda', torch.bfloat16)
     model.configure_execution(False)
-    apply_adapter(model, AdapterConfig(kind=kind, rank=2, alpha=2, dtype='bfloat16',
+    apply_adapter(model, adapter_config(kind, rank=2, alpha=2, dtype='bfloat16',
                                       moss_train_text_refiner=False))
     groups = build_adapter_param_groups(model, ComponentLRs(), 1e-4, block_lr=plan())
     cfg = OptimizerConfig(kind='came', lr=1e-4)

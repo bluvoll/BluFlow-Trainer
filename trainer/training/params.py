@@ -147,39 +147,47 @@ def build_param_groups(
     lrs: ComponentLRs,
     default_lr: float,
     weight_decay: float = 0.0,
+    block_lr: BlockLRConfig | None = None,
 ) -> ParamGroupReport:
     """Split parameters by component, freeze the zero-LR ones, and return optimizer groups.
 
     Freezing happens here rather than in the caller so that `requires_grad` and the optimizer
     groups can never disagree -- a parameter is in a group if and only if it is trainable.
     """
-    buckets: dict[str, list[torch.nn.Parameter]] = {c: [] for c in COMPONENTS}
+    multipliers = (block_lr or BlockLRConfig()).expanded()
+    buckets: dict[tuple[str, float], list[torch.nn.Parameter]] = {}
     counts: dict[str, int] = {}
     frozen: dict[str, int] = {}
 
-    named = [(classify(n), p) for n, p in transformer.named_parameters()
+    named = [(n, classify(n), p) for n, p in transformer.named_parameters()
              if not (getattr(transformer, 'model_family', None) == 'flux3' and '.image_cond.' in n)]
     if getattr(transformer, 'model_family', None) == 'flux3':
         for n,p in transformer.named_parameters():
             if '.image_cond.' in n: p.requires_grad_(False)
 
-    for component, param in named:
-        if lrs.resolve(component, default_lr) == 0.0:
+    for name, component, param in named:
+        # All parameters within a joint block, including norms/biases. Refiner
+        # and input/output/time projections retain their component learning rate.
+        match = re.match(r'^layers\.(\d+)\.', name)
+        multiplier = multipliers[int(match[1])] if match and block_lr and block_lr.enabled else 1.0
+        if lrs.resolve(component, default_lr) * multiplier == 0.0:
             param.requires_grad_(False)
             frozen[component] = frozen.get(component, 0) + param.numel()
             continue
         param.requires_grad_(True)
-        buckets[component].append(param)
+        buckets.setdefault((component, multiplier), []).append(param)
         counts[component] = counts.get(component, 0) + param.numel()
 
     groups = [
         {
             "params": params,
-            "lr": lrs.resolve(component, default_lr),
+            "lr": lrs.resolve(component, default_lr) * multiplier,
             "weight_decay": 0.0 if component == "rti" else weight_decay,
             "component": component,
+            **({"block_lr_mul": multiplier} if block_lr and block_lr.enabled else {}),
         }
-        for component, params in buckets.items()
+        for (component, multiplier), params in sorted(
+            buckets.items(), key=lambda item: (COMPONENTS.index(item[0][0]), item[0][1]))
         if params
     ]
     if not groups:
@@ -195,7 +203,7 @@ def build_adapter_param_groups(
     weight_decay: float = 0.0,
     block_lr: BlockLRConfig | None = None,
 ) -> ParamGroupReport:
-    """The LoRA counterpart of `build_param_groups`: split the *adapter* tensors by the component
+    """The adapter counterpart of `build_param_groups`: split adapter tensors by the component
     of the base module they wrap.
 
     Only parameters that are already trainable are considered -- `apply_adapter` has frozen the
@@ -303,6 +311,7 @@ class AdapterConfig:
     # LoKr only.
     lokr_factor: int = -1  # -1 = pick the most balanced factorisation
     lokr_decompose_both: bool = False
+    lokr_init: str = "peft"  # PEFT default; "lycoris" starts the large factor at zero.
     # Which subspace `lora_A` starts in: "random" (PEFT's own), or a band of the base weight's
     # singular directions -- "top" | "mid" | "bottom". See `spectrum_init`. lora_B stays zero in
     # every case, so the starting model is numerically identical and only the subspace differs.
@@ -319,6 +328,11 @@ class AdapterConfig:
             raise ValueError("adapter.dtype must be float32 or bfloat16")
         if type(self.lokr_factor) is not int or self.lokr_factor < -1:
             raise ValueError("adapter.lokr_factor must be an integer >= -1")
+        if self.lokr_init not in ('peft', 'lycoris'):
+            raise ValueError("adapter.lokr_init must be peft or lycoris")
+        if self.kind == 'lokr' and (isinstance(self.alpha, bool) or not isinstance(self.alpha, (float, int))
+                                    or not math.isfinite(self.alpha) or self.alpha <= 0):
+            raise ValueError('PEFT LoKr alpha must be finite and positive')
         self._validate_lora_targets()
         if self.lycoris_algo == "lora":
             self.lycoris_algo = "locon"
@@ -360,6 +374,7 @@ class AdapterConfig:
             target_modules=targets,
             decompose_factor=self.lokr_factor,
             decompose_both=self.lokr_decompose_both,
+            init_weights='lycoris' if self.lokr_init == 'lycoris' else True,
         )
 
 

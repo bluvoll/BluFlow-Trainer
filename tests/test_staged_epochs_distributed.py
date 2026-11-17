@@ -9,7 +9,7 @@ import torch.multiprocessing as mp
 import pytest
 
 
-def epoch_worker(rank, root, explicit=False):
+def epoch_worker(rank, root, explicit=False, kind='lora'):
     from test_resolution_schedule import Samples, enable_checkpoint_saving
     from test_staged_epochs import epoch_trainer
     from test_stage_exposure import fractional_trainer
@@ -24,7 +24,7 @@ def epoch_worker(rank, root, explicit=False):
         if rank == 0:
             Samples(root)
         dist.barrier()
-        first = factory(root)
+        first = factory(root, kind=kind)
         first.accelerator.end_training = lambda: None
         enable_checkpoint_saving(first, root)
         first.train()
@@ -40,7 +40,7 @@ def epoch_worker(rank, root, explicit=False):
             dist.broadcast(reference, 0)
             torch.testing.assert_close(value, reference, rtol=0, atol=0)
         first.accelerator.free_memory()
-        resumed = factory(root)
+        resumed = factory(root, kind=kind)
         resumed.accelerator.end_training = lambda: None
         enable_checkpoint_saving(resumed, root)
         resumed._resume(str(root/'output'/'staged-test-step000003-state'))
@@ -58,11 +58,12 @@ def epoch_worker(rank, root, explicit=False):
 
 
 @pytest.mark.parametrize('explicit', [False, True])
-def test_two_rank_epochs_and_resume(tmp_path, explicit):
+@pytest.mark.parametrize('kind', ['lora', 'none', 'lokr', 'lycoris_lokr'])
+def test_two_rank_epochs_and_resume(tmp_path, explicit, kind):
     try:
         dist.ProcessGroupGloo.create_default_device()
     except RuntimeError as exc:
         if 'unsupported gloo device' in str(exc):
             pytest.skip(f'This Torch build cannot create a Gloo transport: {exc}')
         raise
-    mp.spawn(epoch_worker, args=(str(tmp_path), explicit), nprocs=2, join=True)
+    mp.spawn(epoch_worker, args=(str(tmp_path), explicit, kind), nprocs=2, join=True)

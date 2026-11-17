@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import pytest
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6 import QtWidgets
 
@@ -58,10 +59,12 @@ def test_stage_metrics_reach_graph_and_header():
     app.processEvents()
 
 
-def test_gui_enabling_stages_hides_epochs_and_seeds_valid_plan(gui):
+@pytest.mark.parametrize('kind', ['lora', 'lokr', 'lycoris_lokr'])
+def test_gui_enabling_stages_hides_epochs_and_seeds_valid_plan(gui, kind):
     gui._apply(bridge.defaults() | {
         'dataset.path': '/images', 'dataset.source': 'latents', 'train.model_family': 'moss_image',
-        'adapter.kind': 'lora', 'train.batch_size': 2,
+        'adapter.kind': 'lycoris_lora' if kind == 'lycoris_lokr' else kind,
+        'adapter.lycoris_algo': 'lokr' if kind == 'lycoris_lokr' else 'locon', 'train.batch_size': 2,
         'dataset.resolutions': [256, 384, 512, 640, 768, 1024],
     })
     gui.editors['resolution_schedule.enabled'].set(True)

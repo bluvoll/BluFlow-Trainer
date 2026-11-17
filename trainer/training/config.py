@@ -415,9 +415,9 @@ def validate_model_options(cfg):
     from ..modeling.loader import resolve_model_family
     cfg.train.model_family = resolve_model_family(cfg.train.model_path, cfg.train.model_family)
     if cfg.block_lr.enabled and (cfg.train.model_family != 'moss_image' or not (
-            cfg.adapter.kind == 'lora' or (cfg.adapter.kind == 'lycoris_lora'
-                                         and cfg.adapter.lycoris_algo == 'locon'))):
-        raise ValueError('Experimental block LR requires MOSS PEFT LoRA or LyCORIS LoCon training')
+            cfg.adapter.kind in ('none', 'lora', 'lokr') or (cfg.adapter.kind == 'lycoris_lora'
+                                         and cfg.adapter.lycoris_algo in ('locon', 'lokr')))):
+        raise ValueError('Experimental block LR requires MOSS full finetuning, PEFT LoRA/LoKr or LyCORIS LoCon/LoKr training')
     if cfg.train.moss_checkpoint_inside_compile and cfg.train.model_family != "moss_image":
         raise ValueError("train.moss_checkpoint_inside_compile requires MOSS-Image")
     if cfg.quant.preset != "custom" and (
@@ -426,8 +426,8 @@ def validate_model_options(cfg):
         raise ValueError("Quantization presets require MOSS BF16 adapter training; "
                          "use quant.preset='custom' for full finetuning or other models")
     if cfg.quant.frozen_matmul:
-        supported_adapter = cfg.adapter.kind == "lora" or (
-            cfg.adapter.kind == "lycoris_lora" and cfg.adapter.lycoris_algo == "locon"
+        supported_adapter = cfg.adapter.kind in ("lora", "lokr") or (
+            cfg.adapter.kind == "lycoris_lora" and cfg.adapter.lycoris_algo in ("locon", "lokr")
             and cfg.adapter.lycoris_bypass
         )
         if (cfg.train.model_family != "moss_image" or cfg.train.dtype != "bfloat16"
@@ -436,12 +436,22 @@ def validate_model_options(cfg):
                 or cfg.quant.group_size != -1 or cfg.quant.use_stochastic_rounding
                 or cfg.quant.dynamic_loss_threshold is not None):
             raise ValueError("Frozen SDNQ INT8 matmul input-gradient path requires MOSS BF16 "
-                             "PEFT LoRA or bypass LyCORIS LoCon, BF16 adapters and random initialization, "
+                             "PEFT LoRA/LoKr or bypass LyCORIS LoCon/LoKr, BF16 adapters and random initialization, "
                              "INT8 weights, group_size=-1, stochastic rounding off and no dynamic "
                              "loss threshold. Choose quant.preset='balanced' or 'fast' for the "
                              "quantization settings, or disable quantized matmul.")
     if cfg.quant.use_hadamard and not cfg.quant.frozen_matmul:
-        raise ValueError("quant.use_hadamard currently requires the frozen MOSS INT8 matmul path")
+        training_hadamard = (
+            cfg.train.model_family == 'moss_image' and not cfg.is_lora
+            and cfg.train.dtype == 'bfloat16' and cfg.quant.backend == 'sdnq'
+            and cfg.quant.mode == 'training' and cfg.quant.weights_dtype == 'int8'
+            and cfg.quant.group_size == -1 and cfg.quant.use_quantized_matmul is True
+            and cfg.quant.dynamic_loss_threshold is None
+        )
+        if not training_hadamard:
+            raise ValueError("Hadamard requires frozen MOSS INT8 matmul, or MOSS BF16 full finetuning "
+                             "with SDNQ training mode, INT8 weights, group_size=-1, quantized matmul on "
+                             "and no dynamic loss threshold")
     if cfg.train.moss_qkv_format == 'fused':
         if cfg.train.model_family != 'moss_image':
             raise ValueError("Fused QKV export is only supported for MOSS-Image")

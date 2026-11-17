@@ -1004,7 +1004,7 @@ class BlockLRRangesEditor(_Blockable):
             '0.75 = 25% lower LR; 1.5 = 50% higher LR; 0 freezes that range. '
             'Ranges must not overlap. Unlisted blocks stay at 1.0. '
             'Multiplies the component LR, scheduler and stage/curriculum LR; '
-            'text-refiner adapters are unchanged. This changes training, not inference strength.')
+            'text refiners and projections outside joint blocks are unchanged. This changes training, not inference strength.')
         note.setWordWrap(True)
         layout.addWidget(note)
 

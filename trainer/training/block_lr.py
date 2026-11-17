@@ -1,4 +1,4 @@
-"""Experimental MOSS adapter learning-rate multipliers, indexed by joint block."""
+"""Experimental MOSS learning-rate multipliers, indexed by joint block."""
 from dataclasses import dataclass, field
 import math
 
@@ -28,7 +28,7 @@ class BlockLRConfig:
                 raise ValueError('block_lr ranges must have inclusive integer indices 0 <= start <= end <= 41')
             if (isinstance(multiplier, bool) or not isinstance(multiplier, (float, int))
                     or not math.isfinite(multiplier) or multiplier < 0):
-                raise ValueError('block_lr.lr_mul must be finite and nonnegative (0 freezes adapters in that range)')
+                raise ValueError('block_lr.lr_mul must be finite and nonnegative (0 freezes trainable parameters in that range)')
             indices = set(range(start, end + 1))
             if covered & indices:
                 raise ValueError('block_lr ranges must not overlap')
@@ -46,7 +46,7 @@ class BlockLRConfig:
         # Old states predate this option and used multiplier 1 everywhere.
         expected = [1.0] * 42 if saved_multipliers is None else saved_multipliers
         if expected != self.expanded():
-            raise ValueError('Full-state resume block LR multipliers changed; use weights-only resume to start a new LR plan')
+            raise ValueError('Full-state resume block LR multipliers changed; use weights-only adapter resume or load the finetuned checkpoint as model_path in a fresh run to start a new LR plan')
 
     def summary(self):
         values = self.expanded()

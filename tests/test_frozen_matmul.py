@@ -34,7 +34,7 @@ def test_preset_cli_roundtrip_and_encoder_isolation(tmp_path,preset,dtype,qmm,ro
 
 @pytest.mark.parametrize('section,key,value', [
     ('train','model_family','mage_flow'), ('train','dtype','float32'),
-    ('adapter','kind','none'), ('adapter','kind','lokr'), ('adapter','lycoris_algo','dora'),
+    ('adapter','kind','none'), ('adapter','lycoris_algo','dora'),
     ('adapter','lycoris_bypass',False), ('adapter','dtype','float32')])
 def test_accelerated_preset_rejects_unsupported_training(tmp_path,section,key,value):
     data=config_data();data[section][key]=value
@@ -48,20 +48,63 @@ def test_legacy_settings_unchanged():
     assert not cfg.use_hadamard
 
 
+def finetune_hadamard_data():
+    data=config_data('custom')
+    data['adapter']['kind']='none'
+    data['quant'].update(mode='training',weights_dtype='int8',group_size=-1,
+                         use_quantized_matmul=True,use_hadamard=True)
+    return data
+
+
+def test_finetune_hadamard_cli_and_shared_gui(tmp_path):
+    from trainer.gui import bridge
+    from trainer.ui_core.config import evaluate
+    from trainer.ui_core.rules import _RULES
+    flat=bridge.defaults()|bridge.flatten(finetune_hadamard_data())
+    assert _RULES['quant.use_hadamard'](flat)
+    assert evaluate(flat)['valid']
+    path=tmp_path/'hadamard.toml';bridge.write_toml(path,flat)
+    cfg=load_config(path)
+    assert not cfg.is_lora and cfg.quant.use_hadamard and not cfg.quant.frozen_matmul
+    assert cfg.quant.use_stochastic_rounding
+
+
+@pytest.mark.parametrize('section,key,value',[
+    ('quant','weights_dtype','uint8'),('quant','group_size',0),
+    ('quant','use_quantized_matmul',False),('quant','dynamic_loss_threshold',.1),
+    ('train','dtype','float32'),('train','model_family','mage_flow')])
+def test_finetune_hadamard_rejects_untested_combinations(tmp_path,section,key,value):
+    data=finetune_hadamard_data();data[section][key]=value
+    path=tmp_path/'bad-hadamard.toml';path.write_text(toml.dumps(data))
+    with pytest.raises(ValueError,match='Hadamard'):load_config(path)
+
+
 @pytest.mark.parametrize('preset', ['balanced', 'fast'])
-def test_peft_accelerated_preset_cli_and_gui_roundtrip(tmp_path, preset):
+@pytest.mark.parametrize('kind,algo', [('lora', 'locon'), ('lokr', 'locon'), ('lycoris_lora', 'lokr')])
+def test_adapter_accelerated_preset_cli_and_gui_roundtrip(tmp_path, preset, kind, algo):
     from trainer.gui.bridge import flatten, dump_toml, validate
     data = config_data(preset)
-    data['adapter'].update(kind='lora', rank=8, alpha=8, lycoris_bypass=False)
+    data['adapter'].update(kind=kind, lycoris_algo=algo, rank=8, alpha=8,
+                           lycoris_bypass=kind == 'lycoris_lora')
     path = tmp_path/'peft.toml'
     path.write_text(toml.dumps(data))
     cfg = load_config(path)
-    assert cfg.adapter.kind == 'lora' and cfg.quant.frozen_matmul
+    assert cfg.adapter.kind == kind and cfg.quant.frozen_matmul
     flat = flatten(data)
     assert validate(flat)[0]
     path.write_text(dump_toml(flat))
     restored = load_config(path)
-    assert restored.adapter.kind == 'lora' and restored.quant.preset == preset
+    assert restored.adapter.kind == kind and restored.quant.preset == preset
+
+
+@pytest.mark.parametrize('preset', ['balanced', 'fast'])
+def test_lokr_matmul_requires_lycoris_bypass(tmp_path, preset):
+    data = config_data(preset)
+    data['adapter'].update(lycoris_algo='lokr', lycoris_bypass=False)
+    path = tmp_path / 'lokr-rebuild.toml'
+    path.write_text(toml.dumps(data))
+    with pytest.raises(ValueError, match='bypass'):
+        load_config(path)
 
 
 GPU = pytest.mark.skipif(os.environ.get('BLUFLOW_GPU_TESTS')!='1', reason='GPU opt-in')

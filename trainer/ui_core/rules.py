@@ -203,10 +203,10 @@ _RULES = {
         or (
             c.get("train.model_family") in ("auto", "moss_image")
             and (
-                c.get("adapter.kind") == "lora"
+                c.get("adapter.kind") in ("none", "lora", "lokr")
                 or (
                     c.get("adapter.kind") == "lycoris_lora"
-                    and c.get("adapter.lycoris_algo") == "locon"
+                    and c.get("adapter.lycoris_algo") in ("locon", "lokr")
                 )
             )
         )
@@ -230,6 +230,7 @@ _RULES = {
             and c.get("adapter.lycoris_algo") in ("lokr",)
         )
     ),
+    "adapter.lokr_init": lambda c: c.get("adapter.kind") == "lokr",
     "train.compile_dynamic": lambda c: bool(c.get("train.compile")),
     "train.compile_regional": lambda c: bool(c.get("train.compile")),
     "train.pack_resolutions": lambda c: (
@@ -254,7 +255,7 @@ _RULES = {
     ),
     "quant.use_hadamard": lambda c: (
         c.get("quant.backend", "sdnq") == "sdnq"
-        and c.get("quant.mode") == "frozen"
+        and c.get("quant.mode") in ("frozen", "training")
         and c.get("quant.use_quantized_matmul") is True
     ),
     "quant.skip_policy": lambda c: c.get("quant.mode") != "none",

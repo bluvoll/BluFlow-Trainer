@@ -1,6 +1,4 @@
 """Finite staged epochs, partial accumulation, and exact checkpoint continuation."""
-import copy
-
 import pytest
 import torch
 
@@ -8,8 +6,8 @@ from trainer.data.staged import StagedBatchSampler
 from test_resolution_schedule import Samples, plan, make_trainer, enable_checkpoint_saving, config_text
 
 
-def epoch_trainer(root, workers=0):
-    t = make_trainer(root, workers=workers, accumulation=2, epoch_mode=True)
+def epoch_trainer(root, workers=0, kind='lora'):
+    t = make_trainer(root, kind=kind, workers=workers, accumulation=2, epoch_mode=True)
     t.cfg.train.max_steps = None
     t.cfg.train.save_every_epochs = 1
     return t
@@ -58,8 +56,9 @@ def test_finite_epoch_rank_padding_and_cursor(tmp_path):
 
 
 @pytest.mark.parametrize('workers', [0, 2])
-def test_epoch_loop_and_partial_accumulation(tmp_path, workers):
-    t = epoch_trainer(tmp_path, workers)
+@pytest.mark.parametrize('kind', ['lora', 'lokr', 'lycoris_lokr'])
+def test_epoch_loop_and_partial_accumulation(tmp_path, workers, kind):
+    t = epoch_trainer(tmp_path, workers, kind=kind)
     t.train()
     assert t.sampler.epoch_budgets == [1, 1, 3]
     assert t.sampler.epoch_batches == [3, 4, 7]
@@ -89,16 +88,17 @@ def test_skipped_update_does_not_extend_epoch(tmp_path):
 
 
 @pytest.mark.parametrize('checkpoint_step', [1, 2, 4, 5])
-def test_epoch_full_state_resume(tmp_path, checkpoint_step):
-    t = epoch_trainer(tmp_path)
+@pytest.mark.parametrize('kind', ['lora', 'lokr', 'lycoris_lokr'])
+def test_epoch_full_state_resume(tmp_path, checkpoint_step, kind):
+    t = epoch_trainer(tmp_path, kind=kind)
     enable_checkpoint_saving(t, tmp_path)
     t.train()
-    final = copy.deepcopy(t._unwrap(t.transformer).state_dict())
+    final = {k: v.detach().clone() for k, v in t._unwrap(t.transformer).state_dict().items()}
     trace, lr = list(t.trace), list(t.lr_trace)
     # Update 2 ends a partial group; update 4 is also a stage boundary.
     consumed = {1: 2, 2: 3, 4: 7, 5: 9}[checkpoint_step]
     t.accelerator.free_memory()
-    resumed = epoch_trainer(tmp_path)
+    resumed = epoch_trainer(tmp_path, kind=kind)
     enable_checkpoint_saving(resumed, tmp_path)
     resumed._resume(str(tmp_path / 'output' / f'staged-test-step{checkpoint_step:06d}-state'))
     resumed.train()

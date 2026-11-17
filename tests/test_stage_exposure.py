@@ -75,7 +75,7 @@ def test_fractional_plan_matches_consumption_and_resume_cursor(tmp_path, world):
     assert sampler.budgets == ([1, 3, 9] if world == 1 else [1, 2, 5])
 
 
-@pytest.mark.parametrize('kind', ['lora', 'lycoris_lora'])
+@pytest.mark.parametrize('kind', ['none', 'lora', 'lycoris_lora', 'lokr', 'lycoris_lokr'])
 def test_fractional_loop_and_exact_resume(tmp_path, kind, monkeypatch):
     monkeypatch.setenv('LYCORIS_KERNEL_BACKEND', 'torch')
     trainer = fractional_trainer(tmp_path, kind)

@@ -106,8 +106,37 @@ def test_config_and_epoch_rejection(tmp_path):
             load_config(p)
 
 
+@pytest.mark.parametrize('unit', ['steps', 'epochs', 'stage_epochs'])
+@pytest.mark.parametrize('kind', ['none', 'lokr', 'lycoris_lokr'])
+def test_staged_block_lr_config_and_shared_gui(tmp_path, unit, kind):
+    from trainer.gui import bridge
+    from trainer.ui_core.config import evaluate
+    selection = 'kind = "lycoris_lora"\nlycoris_algo = "lokr"' if kind == 'lycoris_lokr' else f'kind = "{kind}"'
+    text = config_text().replace('kind = "lora"', selection)
+    text = text.replace('enabled = true', f'enabled = true\nunit = "{unit}"')
+    if unit == 'epochs':
+        text = text.replace('max_steps = 560', 'epochs = 10')
+    elif unit == 'stage_epochs':
+        text = text.replace('share=0.2', 'epochs=0.5').replace('share=0.6', 'epochs=1.5')
+    text += '\n[block_lr]\nenabled=true\nranges=[{start=0,end=24,lr_mul=0.75},{start=33,end=41,lr_mul=1.5}]\n'
+    path = tmp_path / 'finetune.toml'
+    path.write_text(text)
+    cfg = load_config(path)
+    assert cfg.is_lora == (kind != 'none')
+    assert cfg.block_lr.expanded() == [.75]*25 + [1.]*8 + [1.5]*9
+    flat = bridge.defaults() | bridge.flatten(bridge.read_toml(path))
+    state = evaluate(flat)
+    assert state['valid'], state['error']
+    from trainer.ui_core.rules import _RULES
+    assert _RULES['block_lr.enabled'](flat | {'block_lr.enabled': False})
+    bridge.write_toml(path, flat)
+    restored = load_config(path)
+    assert restored.block_lr == cfg.block_lr
+    assert restored.resolution_schedule == cfg.resolution_schedule
+
+
 @pytest.mark.parametrize('change', [
-    ('kind = "lora"', 'kind = "none"'),
+    ('kind = "lora"', 'kind = "lycoris_lora"\nlycoris_algo = "dora"'),
     ('share=0.6', 'share=0.5'),
     ('model_family = "moss_image"', 'model_family = "mage_flow"'),
     ('pack_resolutions = true', 'pack_resolutions = false'),
@@ -141,7 +170,8 @@ def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2, epoch_
     cfg.optimizer.lr = 1e-3
     cfg.optimizer.weight_decay = 0
     cfg.schedule.kind = 'rex'
-    cfg.adapter = AdapterConfig(kind=kind, rank=2, alpha=2, dtype='bfloat16' if gpu else 'float32')
+    from test_block_lr import adapter_config
+    cfg.adapter = adapter_config(kind, rank=2, alpha=2, dtype='bfloat16' if gpu else 'float32')
     cfg.train.model_family = 'moss_image'
     model = tiny().to(device=acc.device, dtype=torch.bfloat16 if gpu else torch.float32)
     apply_adapter(model, cfg.adapter)
@@ -160,7 +190,15 @@ def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2, epoch_
     trainer.steps_per_epoch = 0
     if data_setup is not None:
         data_setup(trainer)
-    trainer.groups = [{'params': [p for p in model.parameters() if p.requires_grad]}]
+    if kind in ('none', 'lokr', 'lycoris_lokr'):
+        from trainer.training.block_lr import BlockLRConfig
+        from trainer.training.params import build_param_groups, build_adapter_param_groups
+        cfg.block_lr = BlockLRConfig(True, [dict(start=0, end=0, lr_mul=.75), dict(start=1, end=1, lr_mul=1.5)])
+        builder = build_param_groups if kind == 'none' else build_adapter_param_groups
+        trainer.groups = builder(model, cfg.component_lr, cfg.optimizer.lr,
+                                 block_lr=cfg.block_lr).groups
+    else:
+        trainer.groups = [{'params': [p for p in model.parameters() if p.requires_grad]}]
     trainer._build_optimizer()
     trainer.transformer, trainer.optimizer, trainer.scheduler = acc.prepare(model, trainer.optimizer, trainer.scheduler)
     trainer.text_encoder = None
@@ -190,7 +228,7 @@ def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2, epoch_
     return trainer
 
 
-@pytest.mark.parametrize('kind', ['lora', 'lycoris_lora'])
+@pytest.mark.parametrize('kind', ['none', 'lora', 'lycoris_lora', 'lokr', 'lycoris_lokr'])
 @pytest.mark.parametrize('workers', [0, 2])
 def test_real_loop_transitions_and_prefetch(tmp_path, kind, workers, monkeypatch):
     monkeypatch.setenv('LYCORIS_KERNEL_BACKEND', 'torch')
@@ -245,7 +283,7 @@ def enable_checkpoint_saving(t, root):
 
 
 @pytest.mark.parametrize('checkpoint_step', [1, 2, 3])
-@pytest.mark.parametrize('kind', ['lora', 'lycoris_lora'])
+@pytest.mark.parametrize('kind', ['none', 'lora', 'lycoris_lora', 'lokr', 'lycoris_lokr'])
 def test_full_state_resume_matches_uninterrupted(tmp_path, checkpoint_step, kind, monkeypatch):
     monkeypatch.setenv('LYCORIS_KERNEL_BACKEND', 'torch')
     first = make_trainer(tmp_path, kind=kind)

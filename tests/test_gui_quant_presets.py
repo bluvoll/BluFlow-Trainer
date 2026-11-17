@@ -11,14 +11,14 @@ from trainer.training.quant import QUANT_PRESETS
 
 
 @pytest.mark.parametrize('preset',['standard','balanced','fast'])
-@pytest.mark.parametrize('kind',['lycoris_lora','lora'])
-def test_preset_controls_save_and_reload(monkeypatch,tmp_path,preset,kind):
+@pytest.mark.parametrize('kind,algo',[('lycoris_lora','locon'),('lora','locon'),('lokr','locon'),('lycoris_lora','lokr')])
+def test_preset_controls_save_and_reload(monkeypatch,tmp_path,preset,kind,algo):
     app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     monkeypatch.setattr(TrainingGUI,'_load_presets',lambda self,**kw:None)
     gui=TrainingGUI(preferences=Preferences(tmp_path/"gui.json"), config_dir=str(tmp_path))
     try:
         gui._apply(bridge.defaults() | {'dataset.path':'/images','train.model_family':'moss_image',
-            'adapter.kind':kind,'adapter.dtype':'bfloat16'})
+            'adapter.kind':kind,'adapter.lycoris_algo':algo,'adapter.dtype':'bfloat16'})
         gui.editors['quant.preset'].set(preset);gui._on_edit()
         flat=gui.collect()
         for key,value in QUANT_PRESETS[preset].items():
@@ -32,5 +32,38 @@ def test_preset_controls_save_and_reload(monkeypatch,tmp_path,preset,kind):
         assert gui.editors['quant.mode'].widget.isEnabled()
         assert gui.editors['quant.weights_dtype'].widget.isEnabled()
         assert gui.collect()['quant.weights_dtype']==cfg.quant.weights_dtype
+    finally:
+        gui.close();gui.deleteLater();app.processEvents()
+
+
+def test_full_finetune_hadamard_controls(monkeypatch,tmp_path):
+    app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    monkeypatch.setattr(TrainingGUI,'_load_presets',lambda self,**kw:None)
+    gui=TrainingGUI(preferences=Preferences(tmp_path/'gui.json'))
+    try:
+        gui._apply(bridge.defaults()|{'dataset.path':'/images','train.model_family':'moss_image',
+            'adapter.kind':'none','train.dtype':'bfloat16','quant.preset':'custom','quant.mode':'training',
+            'quant.weights_dtype':'int8','quant.group_size':-1,'quant.use_quantized_matmul':True})
+        assert gui.editors['quant.use_hadamard'].widget.isEnabled()
+        gui.editors['quant.use_hadamard'].set(True);gui._on_edit()
+        assert bridge.validate(gui.collect())[0]
+        path=tmp_path/'full-hadamard.toml';bridge.write_toml(path,gui.collect())
+        assert load_config(path).quant.use_hadamard
+    finally:
+        gui.close();gui.deleteLater();app.processEvents()
+
+
+def test_peft_lokr_initialization_control(monkeypatch,tmp_path):
+    app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    monkeypatch.setattr(TrainingGUI,'_load_presets',lambda self,**kw:None)
+    gui=TrainingGUI(preferences=Preferences(tmp_path/'gui.json'))
+    try:
+        gui._apply(bridge.defaults()|{'dataset.path':'/images','train.model_family':'moss_image','adapter.kind':'lokr'})
+        assert gui.editors['adapter.lokr_init'].widget.isEnabled()
+        gui.editors['adapter.lokr_init'].set('lycoris');gui._on_edit()
+        path=tmp_path/'lokr.toml';bridge.write_toml(path,gui.collect())
+        assert load_config(path).adapter.build().init_weights=='lycoris'
+        gui.editors['adapter.kind'].set('lora');gui._on_edit()
+        assert not gui.editors['adapter.lokr_init'].widget.isEnabled()
     finally:
         gui.close();gui.deleteLater();app.processEvents()

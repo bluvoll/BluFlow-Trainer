@@ -1,4 +1,4 @@
-"""Update shares, whole-epoch shares, and explicit epochs for staged MOSS adapters."""
+"""Update shares, whole-epoch shares, and explicit epochs for staged MOSS training."""
 from dataclasses import dataclass, field
 import math
 
@@ -76,8 +76,8 @@ class ResolutionSchedule:
         from ..modeling.loader import resolve_model_family
         if resolve_model_family(cfg.train.model_path, cfg.train.model_family) != 'moss_image':
             raise ValueError('Staged resolution training currently supports MOSS only')
-        if cfg.adapter.kind not in ('lora', 'lycoris_lora') or (cfg.adapter.kind == 'lycoris_lora' and cfg.adapter.lycoris_algo != 'locon'):
-            raise ValueError('Staged resolution training requires PEFT LoRA or LyCORIS LoCon')
+        if cfg.adapter.kind not in ('none', 'lora', 'lokr', 'lycoris_lora') or (cfg.adapter.kind == 'lycoris_lora' and cfg.adapter.lycoris_algo not in ('locon', 'lokr')):
+            raise ValueError('Staged resolution training requires full finetuning, PEFT LoRA/LoKr or LyCORIS LoCon/LoKr')
         self.budgets(cfg.train.epochs if self.unit == 'epochs' else cfg.train.max_steps)
         if not cfg.train.pack_resolutions or cfg.train.attention_backend not in ('torch_varlen', 'flash_attn_2'):
             raise ValueError('Staged resolution training requires packing and varlen attention')

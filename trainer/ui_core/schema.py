@@ -277,7 +277,7 @@ SPEC: dict[str, Spec] = {
     ),
     "resolution_schedule.enabled": _spec(
         "Staged resolutions",
-        "MOSS PEFT LoRA / LyCORIS LoCon with cached latents only. Split updates/epochs by shares, or assign explicit fractional epochs per tier.",
+        "MOSS full finetuning, PEFT LoRA/LoKr / LyCORIS LoCon/LoKr with cached latents only. Split updates/epochs by shares, or assign explicit fractional epochs per tier.",
         lambda: F.BoolEditor("Enable staged resolutions"),
         inline_label=True,
     ),
@@ -1133,15 +1133,16 @@ SPEC: dict[str, Spec] = {
     ),
     "block_lr.enabled": _spec(
         "MOSS block learning rates",
-        "Experimental PEFT LoRA / LyCORIS LoCon training multipliers for joint blocks 0–41. "
+        "Experimental MOSS full finetuning / PEFT LoRA or LoKr / LyCORIS LoCon or LoKr multipliers for joint blocks 0–41. "
         "Does not change rank, alpha, or inference strength. Disabled preserves the usual LR.",
         lambda: F.BoolEditor("Enable MOSS block LR multipliers"),
         inline_label=True,
     ),
     "block_lr.ranges": _spec(
         "Block ranges",
-        "Inclusive zero-based ranges. Unlisted blocks inherit x1.0. Text-refiner adapters are unaffected. "
-        "Changing multipliers requires a fresh run or weights-only resume.",
+        "Inclusive zero-based ranges. Unlisted blocks inherit x1.0. Multiplies component LR and stage LR; zero freezes the range. "
+        "Full finetuning includes block norms/biases. Text refiners and projections outside joint blocks are unaffected. "
+        "Changing multipliers requires a fresh optimizer: for finetuning, load the saved checkpoint as the model for a new run.",
         F.BlockLRRangesEditor,
     ),
     "component_lr.adaln": _spec(
@@ -1199,13 +1200,14 @@ SPEC: dict[str, Spec] = {
     ),
     "adapter.rank": _spec(
         "Rank / dimension",
-        "LoRA rank / LoKr dimension. Large LoKr dimensions such as 10000 are supported; actual factorization depends on layer shapes and factor.",
+        "LoRA rank / LoKr decomposition dimension. LoKr factor and rank jointly determine size; factor 1 alone is not dense. "
+        "On default MOSS, factor 1 with rank >=8192 makes all joint-block target matrices dense and costs about 8.86 GiB in BF16 adapter weights alone (text refiners excluded).",
         lambda: F.IntEditor(1, 2**31 - 1),
     ),
     "adapter.alpha": _spec(
         "Alpha",
-        "peft scales by alpha/r and kohya by alpha/dim, so this transfers unchanged between the "
-        "two export formats.",
+        "PEFT scales by alpha/r. For PEFT LoKr, alpha equal to rank gives unit scaling even for dense factors. "
+        "Dense PEFT LoKr export bakes this scale for Comfy/Forge compatibility; weights-only continuation restores it.",
         lambda: F.FloatEditor(0.1, float(2**31 - 1), 1.0, 2),
     ),
     "adapter.dropout": _spec(
@@ -1215,21 +1217,31 @@ SPEC: dict[str, Spec] = {
     ),
     "adapter.lokr_factor": _spec(
         "LoKr factor",
-        "Passed as factor to LyCORIS LoKr. -1 selects balanced factorization; positive values select the factorization factor. Independent of rank.",
+        "PEFT decompose_factor / LyCORIS factor. -1 selects balanced factorization. "
+        "1 gives a scalar times a large matrix; rank still controls whether that matrix is decomposed. "
+        "Larger factors usually reduce adapter size; factor 1 is not automatically a full-rank update.",
         lambda: F.IntEditor(-1, 2**31 - 1),
     ),
     "adapter.lokr_decompose_both": _spec(
         "LoKr decompose both",
-        "Factor both Kronecker operands rather than one.",
+        "Allow low-rank decomposition of both Kronecker factors when the rank is small enough. "
+        "At factor 1 the first factor is a scalar, so this usually has no effect.",
         lambda: F.BoolEditor("Decompose both LoKr factors"),
         inline_label=True,
+    ),
+    "adapter.lokr_init": _spec(
+        "PEFT LoKr initialization",
+        "Both start with zero adapter effect. PEFT zeros the first factor: at factor 1 the first update trains only a scalar. "
+        "LyCORIS-style zeros the large factor instead, allowing its weights to receive gradients immediately. "
+        "Older configs retain PEFT initialization. This changes the learning trajectory, not just storage.",
+        lambda: F.ChoiceEditor(["PEFT (existing default)", "LyCORIS-style"], ["peft", "lycoris"]),
     ),
     # ------------------------------------------------------------------ quant
     "quant.preset": _spec(
         "MOSS adapter preset",
         "Standard: UINT8 storage with BF16 matmul. Balanced: Hadamard rotation + INT8 matmul. "
         "Fast: INT8 matmul without rotation. Presets override the locked quantization fields; "
-        "Custom preserves manual settings. Balanced/Fast support BF16 PEFT LoRA or BF16 LyCORIS LoCon with bypass. "
+        "Custom preserves manual settings. Balanced/Fast support BF16 PEFT LoRA/LoKr or BF16 LyCORIS LoCon/LoKr with bypass. "
         "These presets are for MOSS adapters, not full finetuning.",
         lambda: F.ChoiceEditor(
             [
@@ -1264,7 +1276,8 @@ SPEC: dict[str, Spec] = {
     ),
     "quant.use_quantized_matmul": _spec(
         "Quantized matmul",
-        "Auto defaults to off. Frozen MOSS INT8 matmul requires BF16 PEFT LoRA or bypass LyCORIS LoCon, INT8 weights, group_size=-1 and stochastic rounding off. Use Balanced/Fast to configure it.",
+        "Auto defaults to off. For full finetuning use Custom + SDNQ training mode. "
+        "Frozen MOSS INT8 matmul requires BF16 PEFT LoRA/LoKr or bypass LyCORIS LoCon/LoKr, INT8 weights, group_size=-1 and stochastic rounding off. Use Balanced/Fast for those adapters.",
         lambda: F.ChoiceEditor(["auto", "on", "off"], ["auto", True, False]),
     ),
     "quant.matmul_tuning": _spec(
@@ -1279,8 +1292,9 @@ SPEC: dict[str, Spec] = {
     ),
     "quant.use_hadamard": _spec(
         "Hadamard rotation",
-        "Rotate frozen MOSS INT8 weights and activations in groups of 256 to limit quantization error. "
-        "Requires the frozen INT8 matmul path; no additional packages. This is not a proven visual-quality ranking.",
+        "Rotate MOSS INT8 weights and activations in groups of 256. Supports frozen adapter matmul or BF16 full finetuning "
+        "with Custom + SDNQ training mode, INT8, group_size=-1, matmul on and no dynamic loss threshold. "
+        "No additional packages. Full-finetune visual quality and speed need separate evaluation.",
         lambda: F.BoolEditor("Use Hadamard rotation"),
         inline_label=True,
     ),
@@ -1584,6 +1598,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                     "adapter.lycoris_algo",
                     "adapter.lokr_factor",
                     "adapter.lokr_decompose_both",
+                    "adapter.lokr_init",
                     "adapter.lycoris_bypass",
                     "adapter.lycoris_wd_on_output",
                     "adapter.rank",

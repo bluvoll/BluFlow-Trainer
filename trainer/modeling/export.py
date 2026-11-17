@@ -69,6 +69,20 @@ def export_checkpoint(model, dest, stem, cfg, dtype, step, *, runtime=None):
         targets |= {k.split(".lokr_")[0] for k in state if ".lokr_" in k}
         for target in targets:
             state[target + ".alpha"] = torch.tensor(alpha, dtype=torch.float32)
+        if cfg.adapter.kind == 'lokr':
+            # PEFT always applies alpha/r. Comfy/Forge apply it only when a
+            # Kronecker factor is rank-decomposed; direct W1/W2 ignore alpha.
+            # Bake that scale for dense pairs and record it for our continuation
+            # loader to undo. Do not scale rank-decomposed pairs twice.
+            scale = alpha / config['r']
+            if not scale:
+                raise ValueError('PEFT LoKr export requires nonzero alpha for recoverable dense scaling')
+            dense = [k for k in state if k.endswith('.lokr_w1')
+                     and k.removesuffix('.lokr_w1') + '.lokr_w2' in state]
+            if dense and scale != 1:
+                for key in dense:
+                    state[key] = (state[key].float() * scale).to(dtype).contiguous()
+                metadata['peft_lokr_dense_scale'] = str(scale)
         metadata["adapter_config"] = json.dumps(config, default=serializable)
         (dest / f"{stem}.json").write_text(metadata["adapter_config"])
         out = dest / f"{stem}.safetensors"

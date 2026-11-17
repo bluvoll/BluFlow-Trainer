@@ -2,6 +2,28 @@
 from importlib.metadata import version
 
 
+def fix_training_tensor_detach():
+    """Keep SDNQ 0.2.9's detach metadata construction out of Dynamo tracing.
+
+    Eager checkpoint recomputation around a compiled INT8 block detaches the
+    trainable SDNQTensor saved by its autograd function. Tracing the dispatch
+    handler can flatten the new wrapper before __init__ sets sdnq_dequantizer.
+    Only the detach handler stays eager; matmul and backward kernels still compile.
+    """
+    if version('sdnq') != '0.2.9':
+        return False
+    import torch
+    from sdnq.training import tensor
+    op = torch.ops.aten.detach.default
+    original = tensor.op_implementations_dict[op]
+    if getattr(original, '_bluflow_eager_detach', False):
+        return True
+    wrapped = torch.compiler.disable(original)
+    wrapped._bluflow_eager_detach = True
+    tensor.op_implementations_dict[op] = wrapped
+    return True
+
+
 def migrate_optimizer_state(optimizer, state_dict):
     """Restore pre-0.2.8 quantized buffers without changing their stored values."""
     import inspect

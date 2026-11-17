@@ -504,6 +504,7 @@ class Trainer:
                 cfg.component_lr,
                 default_lr=cfg.optimizer.lr,
                 weight_decay=cfg.optimizer.weight_decay,
+                block_lr=cfg.block_lr,
             )
             groups = self.param_report.groups
             if self.text_encoder is not None:

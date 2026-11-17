@@ -124,6 +124,11 @@ def load_adapter_weights(model, path):
     if metadata.get('model') and metadata['model'] != getattr(model, 'model_family', 'mage_flow'):
         raise ValueError("Adapter model family differs from the configured base")
     saved = json.loads(metadata.get('adapter_config', '{}'))
+    if not lycoris and getattr(config, 'peft_type', None) == 'LOKR':
+        # With full factors the tensor shapes no longer encode r, but PEFT still
+        # uses it in alpha/r. Shape validation alone cannot detect a changed rank.
+        if 'r' in saved and saved['r'] != config.r:
+            raise ValueError('PEFT LoKr rank differs from saved configuration; match the saved rank for alpha/r scaling')
     if lycoris:
         current = model._lycoris_config
         for option in ('kind', 'lycoris_algo'):
@@ -148,6 +153,19 @@ def load_adapter_weights(model, path):
             raise ValueError(f"{key}: alpha mismatch ({value.item()} vs {reference.item()}); match the saved alpha")
         if not torch.isfinite(value.to(dtype=reference.dtype)).all():
             raise ValueError(f"{key}: values overflow the configured adapter dtype")
+    if 'peft_lokr_dense_scale' in metadata:
+        import math
+        scale = float(metadata['peft_lokr_dense_scale'])
+        if (lycoris or getattr(config, 'peft_type', None) != 'LOKR'
+                or not math.isfinite(scale) or scale == 0
+                or not math.isclose(scale, config.alpha / config.r, rel_tol=1e-6)):
+            raise ValueError('Invalid PEFT LoKr dense export scale')
+        for key in list(state):
+            if key.endswith('.lokr_w1') and key.removesuffix('.lokr_w1') + '.lokr_w2' in state:
+                restored = state[key].float() / scale
+                if not torch.isfinite(restored.to(expected[key].dtype)).all():
+                    raise ValueError(f'{key}: undoing dense export scale overflows adapter dtype')
+                state[key] = restored.to(state[key].dtype)
     if lycoris:
         # Do not change alpha: LyCORIS also caches its derived multiplier.
         state.update({k: v for k, v in expected.items() if k.endswith('.alpha')})

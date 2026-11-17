@@ -340,6 +340,9 @@ external Flash Attention package requires a separate backend integration.
 
 ## MOSS LoRA quantization presets
 
+For the measured memory and speed cost of PEFT ranks 16–256 with Hadamard,
+compile and checkpointing, see the [MOSS rank benchmark](docs/moss-peft-rank-benchmark.md).
+
 In the GUI, open **Quantization → MOSS adapter preset**:
 
 | Preset | Frozen base computation | Choose it for |
@@ -397,7 +400,7 @@ python -m trainer.training.train configs/my-moss-locon.toml
 ```
 
 The presets require **MOSS BF16 adapter training**. Balanced/Fast support
-**PEFT LoRA or bypass LyCORIS LoCon**, with **BF16 adapter dtype and random
+**PEFT LoRA/LoKr or bypass LyCORIS LoCon/LoKr**, with **BF16 adapter dtype and random
 initialization**. For PEFT, select **LoRA (PEFT)** in the GUI, set adapter dtype to
 **bfloat16**, and choose Balanced or Fast. The equivalent TOML is:
 
@@ -412,8 +415,13 @@ dtype = "bfloat16"
 init = "random"
 ```
 
-For LyCORIS, use `kind = "lycoris_lora"`, `lycoris_algo = "locon"`, and
-`lycoris_bypass = true` instead. LoKr and DoRA are not supported by Balanced/Fast.
+For PEFT LoKr, use `kind = "lokr"`. For LyCORIS, use `kind = "lycoris_lora"`,
+`lycoris_algo = "locon"` or `"lokr"`, and `lycoris_bypass = true` instead.
+DoRA is not supported by Balanced/Fast. These presets quantize the frozen base;
+LoKr factors remain BF16. Both PEFT LoKr initialization options are supported.
+LoKr validation covers small compiled MOSS runs with dense and decomposed factors,
+block freezing, export/reload, optimizer resume and two-GPU Hadamard DDP. These checks do not establish
+full-size LoKr speed or visual quality; the timing table above is for LoCon.
 
 LoCon adapter inputs are made contiguous to avoid an out-of-bounds gradient write
 in the pinned LyCORIS atomic kernel with strided inputs. This guard preserves the
@@ -434,6 +442,98 @@ stochastic rounding, and dynamic loss threshold; the GUI locks those fields.
 Switch to Custom to edit them. Omitted `preset` means Custom, so existing TOMLs
 keep their settings and `use_quantized_matmul = "auto"` still means off.
 The preset and resolved settings are saved in checkpoint metadata.
+
+### INT8 matmul and Hadamard full finetuning
+
+MOSS BF16 full finetuning can use SDNQ's trainable INT8 matmul path, including
+Hadamard rotation. Select **Custom**, **SDNQ**, **training**, **INT8**, group size
+**-1**, and turn **Quantized matmul** and optionally **Hadamard rotation** on:
+
+```toml
+[adapter]
+kind = "none"
+
+[quant]
+preset = "custom"
+backend = "sdnq"
+mode = "training"
+weights_dtype = "int8"
+group_size = -1
+use_quantized_matmul = true
+use_hadamard = true
+use_stochastic_rounding = true
+```
+
+Leave dynamic loss threshold unset. Use an SDNQ optimizer such as CAME or
+AdamW8bit; Optimi does not support trainable SDNQ tensors. Block LR and staged
+resolutions remain available. The frozen-adapter calibration wrapper is not used
+for this path; SDNQ selects its training kernels. Export produces ordinary BF16
+weights; full-state resume retains quantized storage and optimizer state.
+
+Small RTX 4090 probes verified updates, frozen blocks, compiled checkpointing,
+Kahan, BF16 export, and exact two-rank DDP continuation. SDNQ 0.2.9 needs a narrow
+compatibility fix to keep tensor-detach metadata construction outside Dynamo;
+the trainer applies it automatically while leaving matmul kernels compiled.
+These checks establish execution correctness, not full-size throughput or visual
+quality. The LoRA preset speed/quality comparison does not carry over to finetuning.
+
+### Configuring PEFT LoKr
+
+Choose **LoKr (PEFT)** under Training mode. Factor controls the Kronecker split;
+rank controls whether its factors are further decomposed. **Factor 1 alone is
+not a dense update:** at a low rank it remains low-rank. For default MOSS joint
+blocks, factor 1 needs rank at least **8192** to make every targeted matrix dense
+(the gated MLP expansion has 16384 output features).
+
+These sizes are calculated from the actual PEFT parameter shapes for all 42 MOSS
+joint blocks, image attention and MLP targets, with text refiners excluded:
+
+| Factor | Rank | Trainable parameters | BF16 adapter weights only |
+|---|---:|---:|---:|
+| -1 (balanced split) | 32 | 1.98 million | 3.77 MiB |
+| 1 | 32 | 74.3 million | 142 MiB |
+| 4 | 10000 | 297 million | 0.554 GiB |
+| 1 | 10000 | 4.76 billion | 8.86 GiB |
+
+Gradients, optimizer state, frozen base weights, and activations are additional.
+Size is not monotonic in rank: crossing PEFT's threshold replaces two decomposed
+matrices with one dense matrix, which can reduce size. Factor-1 dense LoKr has a
+full matrix delta for each targeted linear layer, but it still leaves untargeted
+parameters frozen and uses different initialization/optimization from finetuning.
+
+For a high-capacity, smaller-than-factor-1 experiment, the following uses direct
+Kronecker factors. It is a capacity example, not a tuned quality preset:
+
+```toml
+[adapter]
+kind = "lokr"
+rank = 10000
+alpha = 10000
+dtype = "bfloat16"
+lokr_factor = 4
+lokr_decompose_both = false
+lokr_init = "lycoris"
+moss_train_text_refiner = false
+```
+
+PEFT uses alpha/r even for dense factors; matching alpha to rank gives unit
+scaling. Dense PEFT LoKr exports bake that scale for Comfy/Forge, whose dense
+LoKr loaders ignore alpha. Our weights-only loader reverses the bake and checks
+the original rank; older exports are not modified automatically.
+
+**PEFT LoKr initialization** offers `peft` (the existing default) or `lycoris`.
+Both start with zero adapter effect. PEFT zeros the first factor, so at factor 1
+only the scalar receives the first gradient. LyCORIS-style initialization zeros
+the large factor, allowing it to receive gradients immediately. This changes the
+learning trajectory. Existing TOMLs keep PEFT initialization.
+
+Use BF16 base weights, Standard frozen UINT8-storage/BF16 matmul, or Balanced/Fast
+with BF16 adapters. LyCORIS LoKr requires bypass mode for Balanced/Fast.
+Block LR supports PEFT LoKr, including dense and rank-decomposed factors; all
+trainable factors in a block receive its multiplier, and zero freezes them.
+Staged resolutions also support PEFT LoKr and can combine with block LR, using
+step shares, epoch shares, or explicit epochs per stage.
+Export stays separated Q/K/V; the inference loader must support it.
 
 Checkpoint `training_state` also records UTC `training_started_at`,
 `session_started_at`, and `checkpoint_saved_at` timestamps, plus
@@ -550,13 +650,21 @@ existing integer repeats retain their multiplier meaning. Zero disables a
 source; the combined dataset must remain nonempty. Cache all eligible sources,
 including those not selected in the first epoch.
 
-### Staged resolution LoRA training (experimental)
+### Staged resolution training (experimental)
 
 [Staged MOSS preset](configs/moss-image-lora-staged.toml) trains one resolution tier
-at a time, with its own per-GPU batch size. It supports PEFT LoRA and LyCORIS
-LoCon, cached latents, and packed varlen attention. Choose **Steps**, **Epochs**, or **Epochs per stage**
+at a time, with its own per-GPU batch size. It supports MOSS full finetuning,
+PEFT LoRA/LoKr and LyCORIS LoCon/LoKr, cached latents, and packed varlen attention. Choose **Steps**, **Epochs**, or **Epochs per stage**
 in Stage duration. Steps remain the default: `train.max_steps` counts successful
 optimizer updates, and epoch settings are omitted. Existing non-staged runs are unchanged.
+
+For full finetuning select **Training mode → none (full finetune)** (`adapter.kind = "none"`).
+The same stage controls and block LR ranges apply in both GUIs and the CLI.
+Use `quant.preset = "custom"` with `quant.mode = "none"` for unquantized training,
+or the existing `quant.mode = "training"` path for SDNQ finetuning; frozen-base
+Standard/Balanced/Fast adapter presets are not full-finetuning modes. Use a learning
+rate suited to full-model training. Stage-boundary saves export complete model
+checkpoints and, when enabled, optimizer state; allow enough disk space.
 
 ```toml
 [resolution_schedule]
@@ -670,7 +778,8 @@ experiments cannot be combined with staged resolutions in this first version.
 
 Under **Preferences → Enable advanced experimental settings**, open
 **Experimental → Experimental MOSS block learning rates**. The range table sets
-training LR multipliers for PEFT LoRA or LyCORIS LoCon joint blocks **0–41**;
+training LR multipliers for MOSS full finetuning, PEFT LoRA/LoKr or LyCORIS LoCon/LoKr
+joint blocks **0–41**;
 both ends are inclusive. Defaults are disabled and ×1.0 throughout.
 
 ```toml
@@ -685,14 +794,17 @@ ranges = [
 
 For a separate comparison, change the last multiplier to `1.5`. These are
 experimental settings, not established quality presets. Unlisted blocks stay
-at ×1.0; ranges cannot overlap. Zero freezes the adapters in that range.
-Text-refiner adapters keep their existing component LR.
+at ×1.0; ranges cannot overlap. Zero freezes trainable parameters in that range
+and excludes them from the optimizer. Full finetuning applies the multiplier to
+all parameters inside the block, including norms and biases. Text refiners and
+input/output/timestep projections outside joint blocks keep their component LR.
 
 Multipliers compose with component LRs, the LR scheduler, and resolution-stage
 or curriculum multipliers. They do not change rank, alpha, or inference weights.
 Logs report the ranges, and checkpoints retain the configuration for TOML
 recovery. Full-state resume requires the same effective block multipliers;
-use weights-only continuation to start a different LR plan.
+use weights-only adapter continuation to start a different LR plan. For full
+finetuning, load the saved checkpoint as `train.model_path` in a fresh run instead.
 
 ## Timestep sampling and detail losses
 

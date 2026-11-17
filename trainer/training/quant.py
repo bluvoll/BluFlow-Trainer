@@ -185,6 +185,9 @@ def quantize_module(
         protected += [f'layers.{i}' for i in range(max(0, module.params.num_layers-2), module.params.num_layers)]
         cfg = replace(cfg, extra_skip=cfg.extra_skip + ['.'+name+'.' for name in protected])
     is_training = cfg.mode == "training"
+    if is_training and (resolve_quantized_matmul(cfg) if use_qmm is None else use_qmm):
+        from .sdnq_compat import fix_training_tensor_detach
+        fix_training_tensor_detach()
     if cfg.frozen_matmul:
         if (getattr(module, "model_family", None) != "moss_image"
                 or torch.device(device).type != "cuda" or dtype != torch.bfloat16
