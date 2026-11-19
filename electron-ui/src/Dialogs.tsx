@@ -78,11 +78,17 @@ export function Preferences({ onClose }: { onClose: () => void }) {
   const { state } = useStore((value) => ({ state: value.state })),
     { ask, start } = useActions();
   const [folder, setFolder] = useState(state?.configDir || ''),
+    [maxColumns, setMaxColumns] = useState<number>(state?.preferences.electron_max_columns ?? 0),
     [experimental, setExperimental] = useState(!!state?.preferences.show_experimental),
     [allocator, setAllocator] = useState(state?.preferences.windows_allocator || 'inherit');
   const save = () =>
     void command('preferences.set', {
-      patch: { config_dir: folder, show_experimental: experimental, windows_allocator: allocator },
+      patch: {
+        config_dir: folder,
+        electron_max_columns: maxColumns,
+        show_experimental: experimental,
+        windows_allocator: allocator,
+      },
     })
       .then(onClose)
       .catch(error);
@@ -108,6 +114,21 @@ export function Preferences({ onClose }: { onClose: () => void }) {
         Existing configurations stay in place. Opening external TOMLs and saving makes a copy in the
         managed folder.
       </p>
+      <div className="dialog-field">
+        <label htmlFor="settings-column-limit">Maximum settings columns</label>
+        <select
+          id="settings-column-limit"
+          value={maxColumns}
+          onChange={(e) => setMaxColumns(Number(e.target.value))}
+        >
+          <option value={0}>Auto (fit to panel)</option>
+          {[1, 2, 3, 4].map((columns) => (
+            <option key={columns} value={columns}>
+              {columns}
+            </option>
+          ))}
+        </select>
+      </div>
       <label className="check">
         <input
           type="checkbox"

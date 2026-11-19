@@ -121,10 +121,9 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   await chooseConfig('smoke.toml');
   await page.locator('[data-field="train.run_name"] input').waitFor();
   await page.screenshot({ path: path.join(artifacts, 'workspace.png') });
-  const fields = await page.evaluate(
-    async () => Object.keys((await window.bluflow.request('bootstrap')).fields).length,
+  const fields = await page.evaluate(async () =>
+    Object.keys((await window.bluflow.request('bootstrap')).fields),
   );
-  assert.equal(fields, 203);
   const qkvSelect = page.locator('[data-field="train.moss_qkv_format"] select');
   assert.equal(
     await qkvSelect.inputValue(),
@@ -338,7 +337,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
       .evaluateAll((nodes) => nodes.map((n) => n.dataset.field)))
       renderedFields.add(key);
   }
-  assert.equal(renderedFields.size, fields, 'Every Python field has a rendered editor');
+  assert.deepEqual(renderedFields, new Set(fields), 'Every Python field has a rendered editor');
   // Uneven sections must fill the available width, including when one is collapsed.
   await page.getByRole('button', { name: /^Method.*sections/ }).click();
   await page.getByRole('button', { name: 'Expand all', exact: true }).click();
@@ -374,6 +373,43 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   };
   await packed();
   await page.screenshot({ path: path.join(artifacts, 'settings-wide.png') });
+  const openPreferences = () =>
+    page.getByRole('button', { name: 'Preferences', exact: true }).first().click();
+  const columnLimit = page.getByRole('combobox', { name: 'Maximum settings columns', exact: true });
+  const expectColumns = (count) =>
+    page.waitForFunction((n) => {
+      const cards = [...document.querySelectorAll('.settings-group')];
+      return new Set(cards.map((card) => Math.round(card.getBoundingClientRect().x))).size === n;
+    }, count);
+  await openPreferences();
+  assert.equal(await columnLimit.inputValue(), '0');
+  for (const count of [3, 2]) {
+    await columnLimit.selectOption(String(count));
+    await page.getByRole('button', { name: 'Save preferences', exact: true }).click();
+    await expectColumns(count);
+    await packed();
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(profile, 'gui.json'))).electron_max_columns,
+      count,
+    );
+    await openPreferences();
+    assert.equal(await columnLimit.inputValue(), String(count));
+  }
+  await columnLimit.selectOption('1');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expectColumns(2);
+  await page.getByRole('button', { name: /^Dataset.*sections/ }).click();
+  await expectColumns(2);
+  await page.setViewportSize({ width: 960, height: 700 });
+  await expectColumns(1);
+  await packed();
+  await page.setViewportSize({ width: 3840, height: 1500 });
+  await expectColumns(2);
+  await openPreferences();
+  await columnLimit.selectOption('0');
+  await page.getByRole('button', { name: 'Save preferences', exact: true }).click();
+  await page.getByRole('button', { name: /^Method.*sections/ }).click();
+  await expectColumns(6);
   const rankInput = page.locator('[data-field="adapter.rank"] input');
   await rankInput.focus();
   await page.setViewportSize({ width: 1600, height: 1000 });
@@ -733,7 +769,7 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
     'Closing waits for pending final metrics export',
   );
   console.log(
-    'Electron smoke passed: all 203 editors, fractional repeats and image targets, sampling controls and resolution previews, config save, immutable queue, subsets, search, preferences, four utility outputs, graph hover/zoom/pan/reset, console history/clear, offscreen PNG, compact layout and floating-panel persistence.',
+    `Electron smoke passed: all ${fields.length} editors, fractional repeats and image targets, sampling controls and resolution previews, config save, immutable queue, subsets, search, preferences, settings column limits, four utility outputs, graph hover/zoom/pan/reset, console history/clear, offscreen PNG, compact layout and floating-panel persistence.`,
   );
 })()
   .catch(async (error) => {

@@ -1,9 +1,15 @@
-import { useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 
 // Multicol balancing can leave whole columns empty when cards have very different
 // heights. Grid places every card into a fitting column; measured row spans keep
 // the compact vertical packing without reparenting focused editors on resize.
-export default function SettingsGrid({ children }: { children: ReactNode }) {
+export default function SettingsGrid({
+  children,
+  maxColumns,
+}: {
+  children: ReactNode;
+  maxColumns?: number;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const grid = ref.current!;
@@ -48,7 +54,11 @@ export default function SettingsGrid({ children }: { children: ReactNode }) {
     };
   }, []);
   return (
-    <div className="settings-groups" ref={ref}>
+    <div
+      className="settings-groups"
+      ref={ref}
+      style={maxColumns ? ({ '--settings-max-columns': maxColumns } as CSSProperties) : undefined}
+    >
       {children}
     </div>
   );

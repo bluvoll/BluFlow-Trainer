@@ -131,7 +131,7 @@ export function Settings() {
           <button onClick={() => all(true)}>Collapse all</button>
         </div>
       </div>
-      <SettingsGrid>
+      <SettingsGrid maxColumns={state.preferences.electron_max_columns}>
         {matching.map((group) => (
           <section className="settings-group" key={group.title}>
             <button

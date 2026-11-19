@@ -257,9 +257,14 @@ class Session:
             "show_experimental",
             "windows_allocator",
             "collapsed_sections",
+            "electron_max_columns",
         }
         if not isinstance(patch, dict) or set(patch) - allowed:
             raise ValueError("Unknown preference")
+        if "electron_max_columns" in patch:
+            columns = patch["electron_max_columns"]
+            if type(columns) is not int or columns not in range(5):
+                raise ValueError("Choose Auto (0) or a maximum of 1 to 4 settings columns")
         if "windows_allocator" in patch and patch["windows_allocator"] not in (
             "inherit",
             "native",

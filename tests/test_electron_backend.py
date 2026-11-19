@@ -417,13 +417,18 @@ def test_preferences_keep_legacy_values_and_unicode(session):
         dict(
             autosave=False,
             show_experimental=True,
+            electron_max_columns=2,
             config_dir=str(session.root / "設定"),
         )
     )
     reread = Preferences(session.preferences.path)
     assert reread.values["show_experimental"] is True
     assert not reread.values["autosave"]
+    assert reread.values["electron_max_columns"] == 2
     assert session.config_dir.name == "設定"
+    with pytest.raises(ValueError, match="settings columns"):
+        session.set_preferences({"electron_max_columns": -1})
+    assert session.preferences.values["electron_max_columns"] == 2
 
 
 def test_rpc_unknown_method_rejected(session):
