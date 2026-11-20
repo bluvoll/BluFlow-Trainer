@@ -94,3 +94,27 @@ test('opening a preset waits for a failed in-flight draft and still opens it', a
   assert.deepEqual(calls, ['config.edit', 'config.open']);
   assert.equal(store.state().state.flat['train.run_name'], 'opened');
 });
+
+test('block LR preview waits for the latest block edit to resolve', async () => {
+  const resolvers = [];
+  const store = loadStore(() => new Promise((resolve) => resolvers.push(resolve)));
+  const response = (minimum) => ({
+    flat: { 'block_lr.min_lr_mul': minimum },
+    validation: { blockLRPreview: { multipliers: [minimum], error: '' } },
+  });
+  const preview = () => store.state().state.validation.blockLRPreview;
+  store.accept(response(0.1));
+  assert.deepEqual(preview().multipliers, [0.1]);
+  store.edit('block_lr.min_lr_mul', 0.2);
+  const flight = store.flush();
+  assert.equal(preview(), null);
+  store.edit('block_lr.min_lr_mul', 0.3);
+  resolvers[0](response(0.2));
+  await Promise.resolve();
+  assert.equal(preview(), null);
+  assert.equal(store.state().state.flat['block_lr.min_lr_mul'], 0.3);
+  resolvers[1](response(0.3));
+  await flight;
+  await store.flush();
+  assert.deepEqual(preview().multipliers, [0.3]);
+});

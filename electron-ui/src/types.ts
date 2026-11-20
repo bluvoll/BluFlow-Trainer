@@ -31,6 +31,7 @@ export type TimestepDistribution = {
   shift: number;
 };
 export type ResolutionDistribution = TimestepDistribution & { resolution: number };
+export type BlockLRPreviewData = { multipliers: number[] | null; error: string };
 export type State = {
   previewGrid: [number, number];
   flat: Flat;
@@ -58,6 +59,7 @@ export type State = {
     resolutionDistributions: ResolutionDistribution[];
     timestepError: string;
     stages: Flat[] | null;
+    blockLRPreview: BlockLRPreviewData | null;
     windowsRepair: boolean;
   };
 };

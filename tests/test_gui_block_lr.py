@@ -58,3 +58,33 @@ def test_overlaps_do_not_silently_change_and_unsupported_can_disable(gui):
     assert gui.editors['block_lr.enabled'].widget.isEnabled()
     ok, error = bridge.validate(gui.collect())
     assert not ok and 'block LR' in error
+
+
+def test_depth_settings_roundtrip_and_survive_disable(gui, tmp_path):
+    target = .400000001
+    rows = [dict(start=0, end=3, lr_mul=target),
+            dict(start=4, end=5, lr_mul=.8, scale_by_depth=True)]
+    gui._apply(bridge.defaults() | {'dataset.path': '/images', 'train.model_family': 'moss_image',
+                                    'block_lr.enabled': True, 'block_lr.ranges': rows})
+    minimum = gui.editors['block_lr.min_lr_mul']
+    ranges = gui.editors['block_lr.ranges']
+    assert minimum.get() == .1
+    minimum.set(.15)
+    ranges.table.cellWidget(0, 3).setChecked(True)
+    cfg = gui.collect()
+    path = tmp_path / 'depth.toml'
+    bridge.write_toml(path, cfg)
+    saved = load_config(path).block_lr
+    assert saved.min_lr_mul == .15
+    assert saved.expanded()[:6] == pytest.approx([.15, .23333333367, .31666666733, target, target, .8])
+    assert saved.ranges[0]['lr_mul'] == target
+    gui._apply(bridge.defaults() | bridge.flatten(bridge.read_toml(path)))
+    assert ranges.get() == cfg['block_lr.ranges']
+    gui.editors['block_lr.enabled'].set(False)
+    gui._on_edit()
+    assert not minimum.widget.isEnabled()
+    bridge.write_toml(path, gui.collect())
+    disabled = load_config(path).block_lr
+    assert disabled.expanded() == [1.] * 42
+    assert disabled.ranges == saved.ranges
+    assert disabled.min_lr_mul == saved.min_lr_mul

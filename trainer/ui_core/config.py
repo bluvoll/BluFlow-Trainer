@@ -4,6 +4,7 @@ import copy
 import sys
 from dataclasses import asdict
 from ..gui import bridge
+from ..training.block_lr import BlockLRConfig
 from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults
 from ..training.quant import QUANT_PRESETS
 from ..training.flow import FlowConfig
@@ -214,6 +215,15 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
             ]
         except (ValueError, TypeError, KeyError, ZeroDivisionError):
             pass
+    block_lr_settings = {
+        key: flat[f"block_lr.{key}"]
+        for key in ("enabled", "ranges", "min_lr_mul")
+        if flat.get(f"block_lr.{key}") is not None
+    }
+    try:
+        block_lr_preview = dict(multipliers=BlockLRConfig(**block_lr_settings).expanded(), error="")
+    except ValueError as exc:
+        block_lr_preview = dict(multipliers=None, error=str(exc))
     experiments = show_experimental or any(
         flat.get(k)
         for k in (
@@ -244,5 +254,6 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
         resolutionDistributions=curves,
         timestepError=preview_error,
         stages=stages,
+        blockLRPreview=block_lr_preview,
         windowsRepair=bool(windows_repair),
     )

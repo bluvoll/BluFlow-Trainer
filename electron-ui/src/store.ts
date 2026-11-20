@@ -1,5 +1,5 @@
 import { useRef, useSyncExternalStore } from 'react';
-import type { Bootstrap, DesktopEvent, State, Metrics, Flat } from './types';
+import type { Bootstrap, DesktopEvent, State, Metrics } from './types';
 type Store = {
   data: Bootstrap | null;
   state: State | null;
@@ -65,17 +65,24 @@ export function useStore<T = Store>(
     return () => listeners.delete(listener);
   }, snapshot);
 }
-function optimistic(flat: Flat) {
+function optimisticState(value: State): State {
+  const blockLRPending = ['enabled', 'min_lr_mul', 'ranges'].some(
+    (key) => pending[`block_lr.${key}`],
+  );
   return {
-    ...flat,
-    ...Object.fromEntries(Object.entries(pending).map(([key, edit]) => [key, edit.value])),
+    ...value,
+    flat: {
+      ...value.flat,
+      ...Object.fromEntries(Object.entries(pending).map(([key, edit]) => [key, edit.value])),
+    },
+    validation: blockLRPending ? { ...value.validation, blockLRPreview: null } : value.validation,
   };
 }
 export function accept(result: any, opened = false) {
   const value: State | undefined = result?.state || (result?.flat && result);
   if (value)
     publish({
-      state: { ...value, flat: optimistic(value.flat) },
+      state: optimisticState(value),
       // Opening, including Reload of the same path, discards editor-only drafts.
       // Saving/renaming keeps the current editing session and its disabled drafts.
       configRevision: current.configRevision + (opened ? 1 : 0),
@@ -102,8 +109,7 @@ export function subscribeEvents(callback: (event: DesktopEvent) => void) {
 }
 export function edit(key: string, value: any) {
   pending[key] = { value, revision: ++editRevision };
-  if (current.state)
-    publish({ state: { ...current.state, flat: { ...current.state.flat, [key]: value } } });
+  if (current.state) publish({ state: optimisticState(current.state) });
   clearTimeout(timer);
   timer = setTimeout(() => void flush().catch(error), 180);
 }

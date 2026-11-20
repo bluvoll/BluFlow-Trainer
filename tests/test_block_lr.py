@@ -30,11 +30,49 @@ def plan(first=.75, last=1.5):
     [dict(start=0, end=2, lr_mul=float('nan'))], [dict(start=0, end=2, lr_mul=float('inf'))],
     [dict(start=0, end=2, lr_mul=True)], [dict(start=0, end=2)],
     [dict(start=0, end=2, lr_mul=1, typo=1)],
+    [dict(start=0, end=2, lr_mul=1, scale_by_depth='false')],
+    [dict(start=0, end=2, lr_mul=1, scale_by_depth=1)],
     [dict(start=0, end=2, lr_mul=1), dict(start=2, end=3, lr_mul=1)],
 ])
 def test_invalid_ranges_fail_early(ranges):
     with pytest.raises(ValueError, match='block_lr'):
         BlockLRConfig(True, ranges)
+
+
+@pytest.mark.parametrize('minimum', [-.1, float('nan'), float('inf'), True, '0.1'])
+def test_invalid_minimum_fails_early(minimum):
+    with pytest.raises(ValueError, match='block_lr.min_lr_mul'):
+        BlockLRConfig(min_lr_mul=minimum)
+
+
+def test_depth_scaling_uses_previous_defined_target_in_block_order():
+    rows = [
+        dict(start=8, end=10, lr_mul=0, scale_by_depth=True),
+        dict(start=0, end=3, lr_mul=.4, scale_by_depth=True),
+        dict(start=11, end=11, lr_mul=.9, scale_by_depth=True),
+        dict(start=4, end=6, lr_mul=.8, scale_by_depth=True),
+        dict(start=12, end=13, lr_mul=1.2, scale_by_depth=False),
+        dict(start=15, end=16, lr_mul=1.5, scale_by_depth=True),
+    ]
+    config = BlockLRConfig(True, rows)
+    values = config.expanded()
+    assert values == pytest.approx([
+        .1, .2, .3, .4, .4, .6, .8, 1., .8, .4, 0., .9, 1.2, 1.2, 1., 1.2, 1.5,
+        *([1.] * 25),
+    ])
+    assert (values[0], values[3], values[4], values[6], values[10]) == (.1, .4, .4, .8, 0.)
+    assert config.ranges[0]['start'] == 8
+    BlockLRConfig(True, list(reversed(rows))).check_resume(values)
+    with pytest.raises(ValueError, match='multipliers changed'):
+        BlockLRConfig(True, rows, .2).check_resume(values)
+    config.enabled = False
+    assert config.expanded() == [1.] * 42
+
+
+def test_flat_first_range_anchors_later_ramp():
+    cfg = BlockLRConfig(True, [dict(start=1, end=2, lr_mul=.7),
+                              dict(start=3, end=4, lr_mul=.8, scale_by_depth=True)], .2)
+    assert cfg.expanded()[:5] == [1., .7, .7, .7, .8]
 
 
 def test_disabled_defaults_gaps_and_equivalent_resume():
@@ -52,13 +90,16 @@ def test_disabled_defaults_gaps_and_equivalent_resume():
 
 
 @pytest.mark.parametrize('kind', ['none', 'lora', 'lycoris_lora', 'lokr', 'lycoris_lokr'])
-def test_real_adapters_receive_block_and_component_lr_and_updates(kind):
+@pytest.mark.parametrize('scaled', [False, True])
+def test_real_adapters_receive_block_and_component_lr_and_updates(kind, scaled):
     torch.manual_seed(123)
     model = tiny()
     model.configure_execution(False)
     apply_adapter(model, adapter_config(kind, rank=2, alpha=2, moss_train_text_refiner=True))
     builder = build_param_groups if kind == "none" else build_adapter_param_groups
-    report = builder(model, ComponentLRs(mlp=.02), .01, block_lr=plan())
+    block_lr = BlockLRConfig(True, [dict(start=0, end=1, lr_mul=.4, scale_by_depth=True)]) if scaled else plan()
+    first, last = (.1, .4) if scaled else (.75, 1.5)
+    report = builder(model, ComponentLRs(mlp=.02), .01, block_lr=block_lr)
     # The ordinary optimizer path strips bookkeeping before SDNQ's strict schema.
     came = build_optimizer(report.groups, OptimizerConfig(kind='came', lr=.01))
     assert all('block_lr_mul' not in g and 'component' not in g for g in came.param_groups)
@@ -69,7 +110,7 @@ def test_real_adapters_receive_block_and_component_lr_and_updates(kind):
             assert id(p) not in rates
             continue
         base = .02 if '.ffn_' in name else .01
-        mul = .75 if name.startswith('layers.0.') else 1.5 if name.startswith('layers.1.') else 1.
+        mul = first if name.startswith('layers.0.') else last if name.startswith('layers.1.') else 1.
         assert rates[id(p)] == pytest.approx(base * mul), name
     optimizer = torch.optim.SGD(report.groups)
     xs, t, text, mask = inputs()
@@ -99,6 +140,22 @@ def test_freezing_and_disabled_group_order(kind):
     assert any(p.requires_grad for n, p in model.named_parameters() if n.startswith('layers.1.'))
     with pytest.raises(ValueError, match='nothing to train'):
         build_adapter_param_groups(model, ComponentLRs(), .001, block_lr=plan(0, 0))
+
+
+@pytest.mark.parametrize('kind', ['none', 'lora'])
+def test_ramp_to_zero_freezes_only_target_block(kind):
+    model = tiny()
+    apply_adapter(model, adapter_config(kind, rank=2, alpha=2))
+    builder = build_param_groups if kind == 'none' else build_adapter_param_groups
+    cfg = BlockLRConfig(True, [dict(start=0, end=1, lr_mul=0, scale_by_depth=True)])
+    report = builder(model, ComponentLRs(), .01, block_lr=cfg)
+    rates = {id(param): group['lr'] for group in report.groups for param in group['params']}
+    assert any(param.requires_grad for name, param in model.named_parameters() if name.startswith('layers.0.'))
+    for name, param in model.named_parameters():
+        if name.startswith('layers.1.'):
+            assert not param.requires_grad and id(param) not in rates
+        elif name.startswith('layers.0.') and param.requires_grad:
+            assert rates[id(param)] == pytest.approx(.001)
 
 
 def test_full_model_freezes_blocks_and_components_without_weight_decay():
@@ -219,21 +276,25 @@ def test_unsupported_modes_rejected(family, kind, algo):
 
 
 @pytest.mark.parametrize('kind', ['lora', 'none'])
-def test_metadata_recovery_and_full_resume_guard(tmp_path, kind):
+@pytest.mark.parametrize('scaled', [False, True])
+def test_metadata_recovery_and_full_resume_guard(tmp_path, kind, scaled):
     from test_multires_checkpoint_save import make_trainer
     from trainer.tools.recover_config import recover_file
     trainer = make_trainer(tmp_path, 1, kind=kind)
-    trainer.cfg.block_lr = plan()
+    block_lr = BlockLRConfig(True, [dict(start=0, end=1, lr_mul=.4, scale_by_depth=True)], .15) if scaled else plan()
+    trainer.cfg.block_lr = block_lr
     trainer.cfg.train.save_optimizer_state = True
     trainer.flow_rng = NS(version=1)
     trainer.save_full_state = lambda tag: (tmp_path/'multires-state'/'accelerator').mkdir(parents=True)
     trainer.save('final')
     state = json.loads((tmp_path/'multires-state'/'state.json').read_text())
-    assert state['block_lr_multipliers'] == plan().expanded()
+    assert state['block_lr_multipliers'] == block_lr.expanded()
     target, notes = recover_file(tmp_path/'multires.safetensors')
     assert not notes
-    assert load_config(target).block_lr == plan()
-    trainer.cfg.block_lr = plan(.5)
+    restored = load_config(target).block_lr
+    assert restored == block_lr
+    restored.check_resume(state['block_lr_multipliers'])
+    trainer.cfg.block_lr = plan(.5, .4) if scaled else plan(.5)
     # Refuse before loading optimizer/scheduler state, even with the same group count.
     with pytest.raises(ValueError, match='block LR multipliers changed'):
         trainer._resume(str(tmp_path/'multires.safetensors'))

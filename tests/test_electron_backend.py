@@ -233,6 +233,36 @@ def test_staged_batch_drafts_remain_editable_and_recover(session, draft):
     assert request("config.open", path=saved)["validation"]["valid"]
 
 
+def test_block_lr_preview_uses_resolved_trainer_multipliers(session):
+    from trainer.training.config import load_config
+
+    rows = [dict(start=0, end=3, lr_mul=.4, scale_by_depth=True),
+            dict(start=4, end=6, lr_mul=.8, scale_by_depth=True)]
+    edited = session.edit({'block_lr.enabled': True, 'block_lr.ranges': rows})
+    preview = edited['validation']['blockLRPreview']
+    assert preview['multipliers'][:7] == pytest.approx([.1, .2, .3, .4, .4, .6, .8])
+    assert preview['error'] == ''
+
+    draft = session.edit({'block_lr.ranges': [rows[0], rows[1] | {'start': 3}]})
+    assert not draft['validation']['valid']
+    assert draft['validation']['blockLRPreview']['multipliers'] is None
+    assert 'overlap' in draft['validation']['blockLRPreview']['error']
+    draft = session.edit({'block_lr.ranges': rows, 'block_lr.min_lr_mul': -.1})
+    assert draft['validation']['blockLRPreview']['multipliers'] is None
+    assert 'min_lr_mul' in draft['validation']['blockLRPreview']['error']
+
+    session.edit({'block_lr.min_lr_mul': .2})
+    path = session.save()['path']
+    saved = load_config(path).block_lr
+    assert saved.min_lr_mul == .2
+    assert saved.ranges == rows
+    assert session.open(path)['validation']['blockLRPreview']['multipliers'] == saved.expanded()
+
+    disabled = session.edit({'block_lr.enabled': False, 'dataset.path': None})
+    assert not disabled['validation']['valid']
+    assert disabled['validation']['blockLRPreview']['multipliers'] == [1.] * 42
+
+
 def test_save_external_copy_rename_and_collision(session):
     external = source(session, "external")
     original = external.read_bytes()

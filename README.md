@@ -785,19 +785,26 @@ both ends are inclusive. Defaults are disabled and ×1.0 throughout.
 ```toml
 [block_lr]
 enabled = true
+min_lr_mul = 0.1
 ranges = [
-  {start = 0, end = 24, lr_mul = 0.75},
-  {start = 25, end = 32, lr_mul = 1.0},
-  {start = 33, end = 41, lr_mul = 1.0},
+  {start = 0, end = 3, lr_mul = 0.4, scale_by_depth = true},
+  {start = 4, end = 6, lr_mul = 0.8, scale_by_depth = true},
 ]
 ```
 
-For a separate comparison, change the last multiplier to `1.5`. These are
-experimental settings, not established quality presets. Unlisted blocks stay
-at ×1.0; ranges cannot overlap. Zero freezes trainable parameters in that range
-and excludes them from the optimizer. Full finetuning applies the multiplier to
-all parameters inside the block, including norms and biases. Text refiners and
-input/output/timestep projections outside joint blocks keep their component LR.
+**Scale LR by depth** interpolates across the range in block order. In the
+example, blocks 0–3 use 0.1×, 0.2×, 0.3×, and 0.4×. Blocks 4–6 use 0.4×,
+0.6×, and 0.8×. The first range starts at **Minimum LR** when scaling is enabled.
+Each later ramp starts at the previous defined range’s target, even across
+a gap or after a flat range. A one-block range uses its target. Ranges with
+scaling unchecked use their target on every block. Electron previews the
+effective multiplier for each block beneath the table.
+
+Unlisted blocks use 1×, and ranges cannot overlap. A zero effective LR freezes
+that block’s trainable parameters and excludes them from the optimizer. A ramp
+to zero reaches its target on the final block. Full finetuning applies the
+multiplier to all parameters inside the block, including norms and biases.
+Text refiners and projections outside joint blocks keep their component LR.
 
 Multipliers compose with component LRs, the LR scheduler, and resolution-stage
 or curriculum multipliers. They do not change rank, alpha, or inference weights.

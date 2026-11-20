@@ -681,6 +681,45 @@ tr:last-child > td {
 .subset-editor .path-input > input {
   min-width: 100px;
 }
+.block-lr-ranges th {
+  white-space: normal;
+}
+.block-lr-ranges th:nth-child(4),
+.block-lr-ranges td:nth-child(4) {
+  text-align: center;
+}
+.block-lr-preview {
+  margin-top: 10px;
+  padding: 8px 8px 4px;
+  min-height: 184px;
+  background: var(--ui-input);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+}
+.block-lr-preview header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 8px;
+  margin: 0 3px 4px;
+}
+.block-lr-preview output,
+.block-lr-preview p {
+  color: var(--ui-muted);
+}
+.block-lr-preview output {
+  font-variant-numeric: tabular-nums;
+}
+.block-lr-preview canvas {
+  display: block;
+  width: 100%;
+  height: 153px;
+  cursor: crosshair;
+}
+.block-lr-preview canvas:focus-visible {
+  outline: 1px solid var(--ui-focus);
+  outline-offset: -1px;
+}
 .empty-table {
   padding: 12px;
   color: var(--ui-muted);

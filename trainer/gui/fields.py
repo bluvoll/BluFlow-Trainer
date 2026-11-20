@@ -12,8 +12,11 @@ the only honest spelling: `component_lr.mlp` unset inherits `optimizer.lr`, whil
 
 from __future__ import annotations
 
+from sys import float_info
+
 from PySide6 import QtCore, QtWidgets
 
+from ..training.block_lr import BLOCK_COUNT
 from .widgets import (
     NoScrollComboBox,
     NoScrollDoubleSpinBox,
@@ -983,14 +986,14 @@ class SubsetEditor(_Blockable):
 
 
 class BlockLRRangesEditor(_Blockable):
-    """Inclusive MOSS block ranges; untouched ranges inherit multiplier one."""
+    """Inclusive MOSS block ranges with optional depth scaling."""
     def __init__(self):
         box = QtWidgets.QWidget()
         super().__init__(box)
         layout = QtWidgets.QVBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.table = QtWidgets.QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(['First block (0–41)', 'Last block (inclusive)', 'LR multiplier'])
+        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(['First block (0–41)', 'Last block (inclusive)', 'LR target (×)', 'Scale LR by depth'])
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.table.setMinimumHeight(160)
         layout.addWidget(self.table)
@@ -1001,17 +1004,16 @@ class BlockLRRangesEditor(_Blockable):
             buttons.addWidget(button)
         layout.addLayout(buttons)
         note = QtWidgets.QLabel(
-            '0.75 = 25% lower LR; 1.5 = 50% higher LR; 0 freezes that range. '
-            'Ranges must not overlap. Unlisted blocks stay at 1.0. '
-            'Multiplies the component LR, scheduler and stage/curriculum LR; '
-            'text refiners and projections outside joint blocks are unchanged. This changes training, not inference strength.')
+            'Scaling starts at the previous range’s target, or Minimum LR for the first range. '
+            'Unchecked ranges use a constant multiplier. Unlisted blocks stay at 1×. '
+            'A block with zero effective LR freezes.')
         note.setWordWrap(True)
         layout.addWidget(note)
 
     def _add(self, *_):
         ranges = self.get()
         covered = {i for row in ranges for i in range(row['start'], row['end'] + 1)}
-        remaining = sorted(set(range(42)) - covered)
+        remaining = sorted(set(range(BLOCK_COUNT)) - covered)
         if remaining:
             self.set(ranges + [dict(start=remaining[0], end=remaining[0], lr_mul=1.0)])
             self._emit()
@@ -1032,19 +1034,40 @@ class BlockLRRangesEditor(_Blockable):
                 editor.setLocale(QtCore.QLocale.c())
                 # Broad widget ranges preserve invalid TOMLs for loader validation
                 # rather than silently clamping a loaded range into a different plan.
-                editor.setRange(-1000000, 1000000)
                 if col == 2:
+                    editor.setRange(-float_info.max, float_info.max)
                     editor.setDecimals(6)
                     editor.setSingleStep(.05)
+                else:
+                    editor.setRange(-1000000, 1000000)
                 editor.setValue(entry[key])
+                if col == 2:
+                    editor.setProperty('originalMultiplier', entry[key])
+                    editor.setProperty('displayedMultiplier', editor.value())
                 self.table.setCellWidget(row, col, editor)
                 editor.valueChanged.connect(self._emit)
+            scale = QtWidgets.QCheckBox()
+            scale.setAccessibleName(f'Range {row + 1} Scale LR by depth')
+            scale.setChecked(entry.get('scale_by_depth') is True)
+            scale.setProperty('scaleByDepth', entry.get('scale_by_depth'))
+            scale.toggled.connect(lambda checked, box=scale: box.setProperty('scaleByDepth', checked))
+            scale.toggled.connect(self._emit)
+            self.table.setCellWidget(row, 3, scale)
 
     def get(self):
-        return [dict(start=self.table.cellWidget(row, 0).value(),
-                     end=self.table.cellWidget(row, 1).value(),
-                     lr_mul=self.table.cellWidget(row, 2).value())
-                for row in range(self.table.rowCount())]
+        ranges = []
+        for row in range(self.table.rowCount()):
+            target = self.table.cellWidget(row, 2)
+            multiplier = target.value()
+            if multiplier == target.property('displayedMultiplier'):
+                multiplier = target.property('originalMultiplier')
+            entry = dict(start=self.table.cellWidget(row, 0).value(),
+                         end=self.table.cellWidget(row, 1).value(), lr_mul=multiplier)
+            scale = self.table.cellWidget(row, 3).property('scaleByDepth')
+            if scale is not None:
+                entry['scale_by_depth'] = scale
+            ranges.append(entry)
+        return ranges
 
 
 class ResolutionStagesEditor(_Blockable):

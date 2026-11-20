@@ -211,6 +211,7 @@ _RULES = {
             )
         )
     ),
+    "block_lr.min_lr_mul": lambda c: bool(c.get("block_lr.enabled")),
     "block_lr.ranges": lambda c: bool(c.get("block_lr.enabled")),
     "adapter.rank": lambda c: c.get("adapter.kind") != "none",
     "adapter.alpha": lambda c: c.get("adapter.kind") != "none",

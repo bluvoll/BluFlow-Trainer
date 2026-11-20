@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Field, Flat } from './types';
 import { edit, error, useStore } from './store';
 import { StageExposure } from './StageExposure';
+import { BlockLRPreview } from './BlockLRPreview';
 
 export const editorKinds = [
   'TextEditor',
@@ -206,7 +207,8 @@ function TableEditor({
     configRevision: value.configRevision,
   }));
   const kind = field.kind,
-    curriculum = kind === 'CurriculumEditor';
+    curriculum = kind === 'CurriculumEditor',
+    blockRanges = kind === 'BlockLRRangesEditor';
   const explicitEpochs = state?.flat['resolution_schedule.unit'] === 'stage_epochs';
   const cacheKey = field.key;
   const [retained, setRetained] = useState<Flat[]>(() => {
@@ -225,14 +227,15 @@ function TableEditor({
       ? ['Folder', 'Image weighting', 'Texture crops']
       : curriculum
         ? ['Start %', 't min', 't max', 'Mode', 'LR ×']
-        : kind === 'BlockLRRangesEditor'
-          ? ['First block', 'Last block', 'LR ×']
+        : blockRanges
+          ? ['First block', 'Last block', 'LR target (×)', 'Scale LR by depth']
           : ['Resolution', explicitEpochs ? 'Epochs' : 'Share %', 'LR %'];
+  const firstBlock = blockRanges
+    ? Array.from({ length: 42 }, (_, i) => i).find(
+        (i) => !rows.some((row) => i >= row.start && i <= row.end),
+      )
+    : undefined;
   const add = () => {
-    const firstBlock = Array.from({ length: 42 }, (_, i) => i).find(
-      (i) => !rows.some((row) => i >= row.start && i <= row.end),
-    );
-    if (kind === 'BlockLRRangesEditor' && firstBlock === undefined) return;
     const row =
       kind === 'SubsetEditor'
         ? { path: '', num_repeats: 1, texture: true }
@@ -243,7 +246,7 @@ function TableEditor({
               mode: 'fullres',
               lr_mul: 1,
             }
-          : kind === 'BlockLRRangesEditor'
+          : blockRanges
             ? { start: firstBlock, end: firstBlock, lr_mul: 1 }
             : { resolution: 1024, ...(explicitEpochs ? { epochs: 1 } : { share: 0.2 }), lr_mul: 1 };
     commit([...rows, row]);
@@ -327,12 +330,33 @@ function TableEditor({
         />
       );
     }
-    const key =
-      kind === 'BlockLRRangesEditor'
-        ? ['start', 'end', 'lr_mul'][column]
-        : ['resolution', explicitEpochs ? 'epochs' : 'share', 'lr_mul'][column];
-    const percent =
-      kind === 'ResolutionStagesEditor' && (column === 2 || (column === 1 && !explicitEpochs));
+    if (blockRanges) {
+      const label = `Range ${index + 1} ${columns[column]}`;
+      if (column === 3)
+        return (
+          <input
+            aria-label={label}
+            type="checkbox"
+            checked={row.scale_by_depth === true}
+            onChange={(event) => set('scale_by_depth', event.target.checked)}
+          />
+        );
+      const key = ['start', 'end', 'lr_mul'][column];
+      return (
+        <ValueInput
+          aria-label={label}
+          type="number"
+          min="0"
+          max={column < 2 ? 41 : undefined}
+          step={column < 2 ? 1 : 'any'}
+          value={row[key]}
+          parse={(text) => numeric(text, column < 2)}
+          onChange={(value) => set(key, value)}
+        />
+      );
+    }
+    const key = ['resolution', explicitEpochs ? 'epochs' : 'share', 'lr_mul'][column];
+    const percent = column === 2 || (column === 1 && !explicitEpochs);
     return (
       <input
         aria-label={`${curriculum ? 'Phase' : 'Row'} ${index + 1} ${columns[column]}`}
@@ -347,7 +371,12 @@ function TableEditor({
     );
   };
   return (
-    <div className={'table-editor ' + (kind === 'SubsetEditor' ? 'subset-editor' : '')}>
+    <div
+      className={
+        'table-editor ' +
+        (kind === 'SubsetEditor' ? 'subset-editor' : blockRanges ? 'block-lr-ranges' : '')
+      }
+    >
       {curriculum && (
         <label className="check">
           <input
@@ -408,13 +437,13 @@ function TableEditor({
         )}
       </div>
       <div className="table-actions">
-        <button onClick={add}>
+        <button onClick={add} disabled={blockRanges && firstBlock === undefined}>
           Add{' '}
           {kind === 'SubsetEditor'
             ? 'subset'
             : curriculum
               ? 'phase'
-              : kind === 'BlockLRRangesEditor'
+              : blockRanges
                 ? 'range'
                 : 'stage'}
         </button>
@@ -440,6 +469,7 @@ function TableEditor({
           Clear
         </button>
       </div>
+      {blockRanges && <BlockLRPreview preview={state?.validation.blockLRPreview ?? null} />}
       {kind === 'ResolutionStagesEditor' && state?.validation.stages && (
         <div className="stage-preview">
           {state.validation.stages.map((stage, i) => (
@@ -671,7 +701,15 @@ function Editor({ field, value }: { field: Field; value: any }) {
         min={a[0] !== undefined && typeof a[0] === 'number' ? a[0] : undefined}
         max={a[1]}
         step={k.step ?? a[2] ?? (integer ? 1 : 'any')}
-        placeholder={typeof a[0] === 'string' ? a[0] : k.optional ? 'Unset' : ''}
+        placeholder={
+          field.key === 'block_lr.min_lr_mul'
+            ? '0.1'
+            : typeof a[0] === 'string'
+              ? a[0]
+              : k.optional
+                ? 'Unset'
+                : ''
+        }
         parse={(s) => numeric(s, integer)}
         onChange={set}
       />

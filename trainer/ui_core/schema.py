@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from sys import float_info
 from typing import Callable
 
 from . import editors as F
@@ -1138,9 +1139,15 @@ SPEC: dict[str, Spec] = {
         lambda: F.BoolEditor("Enable MOSS block LR multipliers"),
         inline_label=True,
     ),
+    "block_lr.min_lr_mul": _spec(
+        "Minimum LR (×)",
+        "Starting multiplier for the first defined range when it scales by depth. Default is 0.1×.",
+        lambda: F.FloatEditor(0.0, float_info.max, 0.05, 6),
+    ),
     "block_lr.ranges": _spec(
         "Block ranges",
-        "Inclusive zero-based ranges. Unlisted blocks inherit x1.0. Multiplies component LR and stage LR; zero freezes the range. "
+        "Inclusive zero-based ranges. Scale LR by depth ramps from the previous range's target to the LR target. "
+        "Unlisted blocks inherit 1×. Multiplies component LR and stage LR. A block with zero effective LR freezes. "
         "Full finetuning includes block norms/biases. Text refiners and projections outside joint blocks are unaffected. "
         "Changing multipliers requires a fresh optimizer: for finetuning, load the saved checkpoint as the model for a new run.",
         F.BlockLRRangesEditor,
@@ -1584,7 +1591,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             ),
             (
                 "Experimental MOSS block learning rates",
-                ["block_lr.enabled", "block_lr.ranges"],
+                ["block_lr.enabled", "block_lr.min_lr_mul", "block_lr.ranges"],
             ),
         ],
     ),

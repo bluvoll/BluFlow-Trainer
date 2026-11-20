@@ -21,6 +21,12 @@ fs.writeFileSync(
   `[train]\nmodel_family="moss_image"\nmodel_path="unused-model"\nrun_name="electron-smoke"\noutput_dir="${profile.replaceAll('\\', '/')}/output"\n[dataset]\npath="${profile.replaceAll('\\', '/')}/images"\n[adapter]\nkind="lora"\n`,
 );
 fs.mkdirSync(path.join(profile, 'images'));
+fs.writeFileSync(
+  path.join(configs, 'block-lr.toml'),
+  `[train]\nmodel_family="moss_image"\nmodel_path="unused-model"\nrun_name="block-lr"\n` +
+    `[dataset]\npath="${profile.replaceAll('\\', '/')}/images"\n[adapter]\nkind="lora"\n` +
+    '[block_lr]\nranges=[]\n',
+);
 const curriculumRecipe =
   `[train]\nmodel_family="moss_image"\nmodel_path="unused-model"\nrun_name="curriculum-test"\n` +
   `[dataset]\npath="${profile.replaceAll('\\', '/')}/images"\nsource="encode"\n[adapter]\nkind="lora"\n`;
@@ -338,6 +344,71 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
       renderedFields.add(key);
   }
   assert.deepEqual(renderedFields, new Set(fields), 'Every Python field has a rendered editor');
+  await openFixture('block-lr.toml');
+  const blockLR = page.getByRole('checkbox', { name: 'MOSS block learning rates', exact: true });
+  const minimumLR = page.getByLabel('Minimum LR (×)', { exact: true });
+  const ranges = page.locator('[data-field="block_lr.ranges"]');
+  const addRange = ranges.getByRole('button', { name: 'Add range', exact: true });
+  const plot = ranges.getByRole('slider', { name: 'Inspect block LR by depth' });
+  const seeBlockLR = (block, multiplier) =>
+    ranges
+      .locator(`canvas[aria-valuetext="Block ${block} · ${multiplier}×"][data-rendered="true"]`)
+      .waitFor();
+  assert.equal(await minimumLR.inputValue(), '0.1');
+  assert.ok(await minimumLR.isDisabled());
+  await seeBlockLR(0, 1);
+  await blockLR.check();
+  await addRange.click();
+  const firstScale = ranges.getByLabel('Range 1 Scale LR by depth', { exact: true });
+  assert.equal(await firstScale.isChecked(), false);
+  await ranges.getByLabel('Range 1 Last block').fill('3');
+  await ranges.getByLabel('Range 1 LR target (×)').fill('0.4');
+  await firstScale.check();
+  await addRange.click();
+  const secondStart = ranges.getByLabel('Range 2 First block');
+  assert.equal(await secondStart.inputValue(), '4');
+  await ranges.getByLabel('Range 2 Last block').fill('6');
+  await ranges.getByLabel('Range 2 LR target (×)').fill('0.8');
+  await ranges.getByLabel('Range 2 Scale LR by depth').check();
+  await seeBlockLR(0, 0.1);
+  for (const [block, multiplier] of [
+    [1, 0.2],
+    [2, 0.3],
+    [3, 0.4],
+    [4, 0.4],
+    [5, 0.6],
+    [6, 0.8],
+  ]) {
+    await plot.press('ArrowRight');
+    await seeBlockLR(block, multiplier);
+  }
+  const plotBounds = await plot.boundingBox();
+  await plot.hover({ position: { x: plotBounds.width - 6, y: 70 } });
+  await seeBlockLR(41, 1);
+  await secondStart.fill('3');
+  await ranges.getByText('block_lr ranges must not overlap', { exact: true }).waitFor();
+  assert.equal(await plot.count(), 0);
+  await secondStart.fill('4');
+  await minimumLR.fill('0.2');
+  await seeBlockLR(0, 0.2);
+  await plot.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(artifacts, 'block-lr-preview.png') });
+  await blockLR.uncheck();
+  await seeBlockLR(0, 1);
+  await blockLR.check();
+  await seeBlockLR(0, 0.2);
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.waitForFunction(async () => (await window.bluflow.request('state')).validation.valid);
+  assert.match(
+    fs.readFileSync(path.join(configs, 'block-lr.toml'), 'utf8'),
+    /scale_by_depth = true/,
+  );
+  await minimumLR.fill('0.25');
+  await seeBlockLR(0, 0.25);
+  await page.getByRole('button', { name: 'Reload', exact: true }).click();
+  await seeBlockLR(0, 0.2);
+  assert.equal(await firstScale.isChecked(), true);
+  await openFixture('electron-smoke-edited.toml');
   // Uneven sections must fill the available width, including when one is collapsed.
   await page.getByRole('button', { name: /^Method.*sections/ }).click();
   await page.getByRole('button', { name: 'Expand all', exact: true }).click();
