@@ -189,8 +189,10 @@ class CaptionVariationCache:
         self.seed = seed
         self.dropout = caption_cfg.caption_dropout_percent
         aug = replace(caption_cfg, caption_dropout_percent=0)
+        legacy = aug.without_moss()
+        self.sampling_pools = {}
         self.indices = []
-        occurrence, totals = {}, {}
+        totals = {}
         unique = {}
         for entry in entries:
             # Repeated entries and resolution variants sharing captions/source stem use one pool.
@@ -199,11 +201,22 @@ class CaptionVariationCache:
             parsed = parse_cache_filename(entry.path)
             stem = parsed[0] if parsed else entry.path.stem
             identity = (str(entry.path.parent.resolve()), stem, entry.tags, entry.nl)
-            pool = digest((identity, asdict(aug), seed, "caption-slots-v1"))
-            ordinal = occurrence.get(pool, 0)
-            occurrence[pool] = ordinal + 1
+            moss = getattr(entry, "moss", None)
+            if moss is None:
+                pool = digest((identity, asdict(legacy), seed, "caption-slots-v1"))
+                sampling = pool
+            else:
+                # A layout changes with the crop. Draw the same caption variant and tag
+                # permutation across tiers and in a matched prose-versus-layout run.
+                sampling = digest((identity, seed, "moss-caption-draw-v1"))
+                signature = (sampling, asdict(aug), moss)
+                if aug.nl_shuffle_sentences:
+                    signature += ("moss-prose-shuffle-v1",)
+                pool = digest(signature)
+                self.sampling_pools[pool] = sampling
+            ordinal = totals.get(sampling, 0)
             self.indices.append((pool, ordinal))
-            totals[pool] = ordinal + 1
+            totals[sampling] = ordinal + 1
             unique[pool] = entry
         self.totals = totals
         if not write:
@@ -213,12 +226,15 @@ class CaptionVariationCache:
             from tqdm import tqdm
 
             for pool, entry in tqdm(unique.items(), desc="Planning caption slots"):
+                sampling = self.sampling_pools.get(pool, pool)
+                moss = getattr(entry, "moss", None)
+                config = legacy if moss is None else aug
                 existing = db.execute(
                     "SELECT COALESCE(MAX(slot)+1,0) FROM slots WHERE pool=?", (pool,)
                 ).fetchone()[0]
                 for slot in range(existing, count):
                     text = build_caption(
-                        entry.tags, entry.nl, aug, random.Random(digest((pool, slot)))
+                        entry.tags, entry.nl, config, random.Random(digest((sampling, slot))), moss,
                     )
                     key = digest(text)
                     db.execute(
@@ -311,21 +327,22 @@ class CaptionVariationCache:
 
     def caption(self, index, epoch, occurrence=None):
         pool, ordinal = self.indices[index]
+        sampling = self.sampling_pools.get(pool, pool)
         if occurrence is not None:
             # Pair epoch and within-epoch appearance without colliding with another visit.
             epoch = (epoch + occurrence) * (epoch + occurrence + 1) // 2 + occurrence
-        visit = epoch * self.totals[pool] + ordinal
+        visit = epoch * self.totals[sampling] + ordinal
         cycle, offset = divmod(visit, self.count)
         # Affine permutation is O(1) space/time and visits each slot once per cycle.
         import math
 
-        rng = random.Random(digest((self.seed, pool, cycle)))
+        rng = random.Random(digest((self.seed, sampling, cycle)))
         a = rng.randrange(1, self.count + 1)
         while math.gcd(a, self.count) != 1:
             a = a % self.count + 1
         slot = (a * offset + rng.randrange(self.count)) % self.count
         if (
-            random.Random(digest((pool, epoch, ordinal, "dropout"))).random()
+            random.Random(digest((sampling, epoch, ordinal, "dropout"))).random()
             < self.dropout
         ):
             return ""

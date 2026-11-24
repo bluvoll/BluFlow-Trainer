@@ -321,11 +321,12 @@ class ChoiceEditor(_Blockable):
     """`values` may differ from the labels shown -- `quant.use_quantized_matmul` is
     `"auto" | True | False`, three different Python types behind three words."""
 
-    def __init__(self, options, values=None):
+    def __init__(self, options, values=None, imported_labels=None):
         w = NoScrollComboBox()
         w.addItems([str(o) for o in options])
         super().__init__(w)
         self.values = list(values) if values is not None else list(options)
+        self.imported_labels = imported_labels or {}
         w.currentIndexChanged.connect(self._emit)
 
     def get(self):
@@ -354,7 +355,7 @@ class ChoiceEditor(_Blockable):
                 self.widget.setCurrentIndex(0)
                 return
             self.values.append(value)
-            self.widget.addItem(f"{value}  (not in this build)")
+            self.widget.addItem(self.imported_labels.get(value, f"{value}  (not in this build)"))
             self.widget.setCurrentIndex(len(self.values) - 1)
 
 
@@ -524,31 +525,59 @@ class BucketMapEditor(_Blockable):
 class WeightsEditor(_Blockable):
     """`caption.mixed_weights` -- relative, not percentages, so no normalisation is imposed."""
 
-    def __init__(self, keys):
+    def __init__(self, keys_by_mode, labels=None):
         container = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(container)
+        row = QtWidgets.QGridLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         self.spins = {}
+        self.labels = {}
+        self.keys_by_mode = keys_by_mode
         super().__init__(container)
-        for k in keys:
-            row.addWidget(make_label(k, bold=False))
-            spin = NoScrollSpinBox()
+        for k in dict.fromkeys(k for keys in keys_by_mode.values() for k in keys):
+            self.labels[k] = make_label((labels or {}).get(k, k), bold=False)
+            spin = NoScrollDoubleSpinBox()
             spin.setLocale(QtCore.QLocale.c())
             spin.setRange(0, 1000)
+            spin.setDecimals(6)
             spin.setMinimumWidth(78)
             spin.valueChanged.connect(self._emit)
-            row.addWidget(spin)
             self.spins[k] = spin
-        row.addStretch(1)
+            row.addWidget(self.labels[k])
+            row.addWidget(spin)
+        row.setColumnStretch(6, 1)
+        self.mode = None
+        self.show_mode("mixed")
+
+    def show_mode(self, mode):
+        if self.mode == mode:
+            return
+        self.mode = mode
+        keys = self.keys_by_mode.get(mode, ())
+        row = self.widget.layout()
+        for key, spin in self.spins.items():
+            for widget in (self.labels[key], spin):
+                widget.setVisible(key in keys)
+                row.removeWidget(widget)
+        for i, key in enumerate(keys):
+            line, col = divmod(i, 3)
+            row.addWidget(self.labels[key], line, 2 * col)
+            row.addWidget(self.spins[key], line, 2 * col + 1)
 
     def get(self):
-        return {k: int(s.value()) for k, s in self.spins.items()}
+        from ..data.caption import LEGACY_VARIANTS
+        allowed = self.keys_by_mode.get(self.mode, LEGACY_VARIANTS)
+        weights = {}
+        for key, spin in self.spins.items():
+            value = spin.value()
+            if value or (key in allowed and key in LEGACY_VARIANTS):
+                weights[key] = int(value) if value.is_integer() else value
+        return weights
 
     def _set(self, value):
         value = value or {}
         for k, s in self.spins.items():
-            s.setValue(int(value.get(k, 0)))
+            s.setValue(value.get(k, 0))
 
     def set_enabled(self, on):
         for s in self.spins.values():

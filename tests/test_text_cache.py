@@ -65,6 +65,11 @@ class TextCacheTests(unittest.TestCase):
             preserve=SimpleNamespace(enabled=False),
         )
         validate_static_captions(cfg)
+        cfg.dataset.caption = CaptionConfig(caption_mode="mixed_json_layout", mixed_weights={"tags": 0, "layout_long": 100})
+        validate_static_captions(cfg)
+        cfg.dataset.caption.mixed_weights["tags"] = 10
+        with self.assertRaisesRegex(ValueError, "mixed_json_layout"):
+            validate_static_captions(cfg)
         for key in (
             "shuffle_tags",
             "tag_dropout_percent",

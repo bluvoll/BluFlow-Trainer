@@ -22,7 +22,7 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 from .bucket import BucketManager, verify_max_resolution
-from .caption import CaptionConfig, build_caption, read_caption_files
+from .caption import JSON_MIXES, CaptionConfig, build_caption, read_caption_files
 from .texture import TextureConfig, fitting_canvases
 from .cache import (
     CACHE_SUFFIX,
@@ -232,6 +232,14 @@ class ImageEntry:
     # even while the curriculum is in a texture phase. See `SubsetConfig`.
     texture_ok: bool = True
     source_key: str = ''
+    moss: dict[str, str] | None = None
+
+
+def resume_caption_fields(entry):
+    """Keep the legacy fingerprint when a sample has no MOSS conditioning."""
+    fields = (entry.tags, entry.nl)
+    moss = getattr(entry, "moss", None)
+    return fields if moss is None else (*fields, moss)
 
 
 @dataclass
@@ -284,7 +292,8 @@ class MageFlowDataset(Dataset):
     embeddings are not cached by default.
     """
 
-    def __init__(self, config: DatasetConfig, require_cache: bool = True, caption_seed: int = 0):
+    def __init__(self, config: DatasetConfig, require_cache: bool = True, caption_seed: int = 0,
+                 *, layout_tokenizer_path=None, max_text_tokens=512):
         self.config = config
         self.bucket_managers = config.build_bucket_managers()
         # Back-compat alias: single-tier callers (the cache CLI, older tests) want one manager.
@@ -293,6 +302,8 @@ class MageFlowDataset(Dataset):
         self.require_cache = require_cache
         self.caption_seed = caption_seed
         self.texture_cfg = config.texture
+        self.layout_tokenizer_path = layout_tokenizer_path
+        self.max_text_tokens = max_text_tokens
         self.tier_report: TierReport | None = None
         self._scan()
 
@@ -336,6 +347,11 @@ class MageFlowDataset(Dataset):
             else:
                 self._scan_images(root)
             fresh = self.entries[start:]
+            if self.config.caption.uses_moss:
+                from .moss_captions import attach_moss_captions
+                attach_moss_captions(fresh, self.bucket_managers, layout_variants=self.config.caption.layout_variants,
+                                     use_cached=not self.encode_on_the_fly, tokenizer_path=self.layout_tokenizer_path,
+                                     max_tokens=self.max_text_tokens)
             if not sub.texture:
                 for e in fresh:
                     e.texture_ok = False
@@ -471,9 +487,7 @@ class MageFlowDataset(Dataset):
                 for b in sorted(expected - set(by_bucket)):
                     missing.append(f"{stem} @ {b[0]}x{b[1]}")
 
-            nl_path = root / f"{stem}_nl.txt"
-            tags = caption_path.read_text(encoding="utf-8").strip()
-            nl = nl_path.read_text(encoding="utf-8").strip() if nl_path.exists() else None
+            tags, nl = read_caption_files(caption_path, read_nl=self.config.caption.caption_mode not in JSON_MIXES)
             for tier, bucket in wanted_pairs:
                 p = by_bucket.get(bucket)
                 if p is None:
@@ -629,7 +643,7 @@ class MageFlowDataset(Dataset):
                     missing_cache.append((p.name, bucket))
                     continue
                 if tags is None:
-                    tags, nl = read_caption_files(p)
+                    tags, nl = read_caption_files(p, read_nl=self.config.caption.caption_mode not in JSON_MIXES)
                 per_tier[tier] += 1
                 self.entries.append(
                     ImageEntry(
@@ -679,7 +693,7 @@ class MageFlowDataset(Dataset):
 
         caption = (self.caption_variation_cache.caption(index, epoch, occurrence)
                    if hasattr(self, "caption_variation_cache")
-                   else build_caption(e.tags, e.nl, self.config.caption, rng))
+                   else build_caption(e.tags, e.nl, self.config.caption, rng, e.moss))
         sample = {"caption": caption, "bucket": e.bucket, "path": str(e.path)}
 
         if self.encode_on_the_fly:

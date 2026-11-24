@@ -4,6 +4,7 @@ import copy
 import sys
 from dataclasses import asdict
 from ..gui import bridge
+from ..data.caption import JSON_MIXES, MIX_DEFAULTS
 from ..training.block_lr import BlockLRConfig
 from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults
 from ..training.quant import QUANT_PRESETS
@@ -18,6 +19,26 @@ from .presets import TRAINTRAIN_CURRICULUM
 def normalize(flat, previous=None):
     value = copy.deepcopy(flat)
     if previous is not None:
+        mode_key, weight_key = "dataset.caption.caption_mode", "dataset.caption.mixed_weights"
+        mode, old = value.get(mode_key), previous.get(mode_key)
+        if mode != old:
+            value.pop(bridge.IMPORTED_CAPTION, None)
+        weights = value.get(weight_key) or {}
+        if mode in MIX_DEFAULTS and mode != old and (
+            weights == previous.get(weight_key) or
+            any(v and k not in MIX_DEFAULTS[mode] for k, v in weights.items())
+        ):
+            if old in JSON_MIXES and mode in JSON_MIXES:
+                # Preserve the user's prose/tag balance when adding or removing layout.
+                medium = weights.get("moss_medium", 0) + weights.get("layout", 0)
+                value[weight_key] = {k: weights.get(k, 0) for k in MIX_DEFAULTS[mode]}
+                value[weight_key]["moss_medium"] = medium if mode == "mixed_json" else 0
+                if mode == "mixed_json_layout":
+                    value[weight_key]["layout"] = medium
+                else:
+                    value[weight_key]["moss_long"] += weights.get("layout_long", 0)
+            else:
+                value[weight_key] = MIX_DEFAULTS[mode].copy()
         if value.get("flow.cabal_shift") and not previous.get("flow.cabal_shift"):
             value["flow.flux_shift"] = False
             if value.get("flow.shift") is None:

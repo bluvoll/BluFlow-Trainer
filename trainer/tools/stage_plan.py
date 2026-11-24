@@ -8,11 +8,12 @@ from ..training.stage_plan import resolve_stage_plan, format_stage_plan
 
 def inspect_plan(cfg, world=1):
     from ..data.dataset import MageFlowDataset
+    from ..data.moss_captions import layout_options
     if not cfg.resolution_schedule.enabled:
         raise ValueError('Enable staged resolutions to calculate an exposure plan')
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        dataset = MageFlowDataset(replace(cfg.dataset, tier_collapse='repeat'))
+        dataset = MageFlowDataset(replace(cfg.dataset, tier_collapse='repeat'), **layout_options(cfg))
     counts = {s.resolution: len(dataset.epoch_indices(0, s.resolution))
               for s in cfg.resolution_schedule.stages}
     rows = resolve_stage_plan(cfg.resolution_schedule,

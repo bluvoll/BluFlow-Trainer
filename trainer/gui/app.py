@@ -663,7 +663,7 @@ class TrainingGUI(QtWidgets.QWidget):
         self._on_preset_changed(self.preset_combo.currentIndex())
 
     def _apply(self, flat):
-        self._cli_values = {k: v for k, v in flat.items() if k in bridge.CLI_ONLY_KEYS}
+        self._cli_values = {k: v for k, v in flat.items() if k in bridge.CLI_ONLY_KEYS or k == bridge.IMPORTED_CAPTION}
         self._applying = True
         try:
             for key, editor in self.editors.items():
@@ -671,6 +671,7 @@ class TrainingGUI(QtWidgets.QWidget):
         finally:
             self._applying = False
         self._last_resolution_enabled = bool(flat.get('resolution_schedule.enabled'))
+        self._last_caption_mode = flat.get("dataset.caption.caption_mode")
         self._last_resolution_unit = flat.get('resolution_schedule.unit', 'steps')
         self._last_optimizer_kind = flat.get("optimizer.kind")
         self._last_adapter_selection = (flat.get("adapter.kind"), flat.get("adapter.lycoris_algo"))
@@ -831,6 +832,7 @@ class TrainingGUI(QtWidgets.QWidget):
         from ..ui_core.config import normalize
         flat = self.collect()
         previous = dict(flat)
+        previous["dataset.caption.caption_mode"] = self._last_caption_mode
         previous['resolution_schedule.enabled'] = getattr(self, '_last_resolution_enabled', False)
         previous['resolution_schedule.unit'] = getattr(self, '_last_resolution_unit', 'steps')
         previous['optimizer.kind'] = getattr(self, '_last_optimizer_kind', flat.get('optimizer.kind'))
@@ -839,6 +841,8 @@ class TrainingGUI(QtWidgets.QWidget):
                              getattr(self, '_last_flow_selection', ('logit_normal', False, False))):
             previous[key] = value
         normalized = normalize(flat, previous)
+        if bridge.IMPORTED_CAPTION in flat and bridge.IMPORTED_CAPTION not in normalized:
+            self._cli_values.pop(bridge.IMPORTED_CAPTION, None)
         self._applying = True
         try:
             for key, value in normalized.items():
@@ -847,6 +851,7 @@ class TrainingGUI(QtWidgets.QWidget):
         finally:
             self._applying = False
         self._last_resolution_enabled = bool(normalized.get('resolution_schedule.enabled'))
+        self._last_caption_mode = normalized.get("dataset.caption.caption_mode")
         self._last_resolution_unit = normalized.get('resolution_schedule.unit', 'steps')
         self._last_optimizer_kind = normalized.get('optimizer.kind')
         self._last_adapter_selection = (normalized.get('adapter.kind'), normalized.get('adapter.lycoris_algo'))
@@ -862,6 +867,12 @@ class TrainingGUI(QtWidgets.QWidget):
 
     def _refresh(self):
         flat = self.collect()
+        from ..data.caption import MIX_DEFAULTS
+        caption_mode = flat.get("dataset.caption.caption_mode")
+        weight_mode = "mixed_custom" if flat.get(bridge.IMPORTED_CAPTION, {}).get("mode") == "mixed_custom" else caption_mode
+        self.editors["dataset.caption.mixed_weights"].show_mode(weight_mode)
+        for widget in self.rows["dataset.caption.mixed_weights"]:
+            widget.setVisible(caption_mode in MIX_DEFAULTS)
         staged = bool(flat.get('resolution_schedule.enabled'))
         epoch_mode = flat.get('resolution_schedule.unit') in ('epochs', 'stage_epochs')
         for key in ('train.epochs', 'train.save_every_epochs'):

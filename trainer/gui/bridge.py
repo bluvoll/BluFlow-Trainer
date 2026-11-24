@@ -28,7 +28,7 @@ from ..training.resolution_schedule import ResolutionSchedule
 from ..training.block_lr import BlockLRConfig
 from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults
 
-from ..data.caption import CaptionConfig
+from ..data.caption import CAPTION_VARIANTS, MIX_DEFAULTS, CaptionConfig, compatible_mix
 from ..data.texture import TextureConfig
 from ..data.dataset import DatasetConfig, SubsetConfig
 from ..training.config import (
@@ -135,12 +135,19 @@ def default_of(f: dc.Field):
 def defaults(optimizer_kind="adamw") -> dict:
     result = {**{k: default_of(f) for k, f in schema().items()},
               **{k: list(v) for k, v in ARRAY_KEYS.items()}}
+    result["dataset.caption.mixed_weights"] = MIX_DEFAULTS["mixed"].copy()
     if optimizer_kind in OPTIMIZERS:
         result.update({f"optimizer.{k}": v for k, v in optimizer_defaults(optimizer_kind).items()})
     return result
 
 
 # ---------------------------------------------------------------- nested <-> flat
+
+# Form state only. Standalone modes in older TOMLs have their own missing-sidecar
+# fallbacks and cache identities, so preserve them when unrelated settings are edited.
+IMPORTED_CAPTION = "_imported_caption"
+_MODE = "dataset.caption.caption_mode"
+_WEIGHTS = "dataset.caption.mixed_weights"
 
 
 def flatten(nested: dict) -> dict:
@@ -170,6 +177,36 @@ def flatten(nested: dict) -> dict:
         value = nested.get(key)
         if isinstance(value, list):
             flat[key] = [dict(entry) for entry in value if isinstance(entry, dict)]
+    mode, weights = flat.get(_MODE), flat.get(_WEIGHTS)
+    if mode in CAPTION_VARIANTS and mode not in ("tags", "nl"):
+        flat[IMPORTED_CAPTION] = {"mode": mode, "weights": weights}
+        flat[_WEIGHTS] = {mode: 100}
+        flat[_MODE] = compatible_mix("mixed", flat[_WEIGHTS])
+    elif mode in MIX_DEFAULTS:
+        mode = compatible_mix(mode, weights)
+        flat[_MODE] = mode
+        flat[_WEIGHTS] = (MIX_DEFAULTS[mode].copy() if weights is None else
+                          {k: v for k, v in weights.items() if v or k in MIX_DEFAULTS[mode]})
+        if mode == "mixed_custom":
+            flat[IMPORTED_CAPTION] = {"mode": mode}
+            flat[_MODE] = "mixed"
+    return flat
+
+
+def _restore_imported_caption(flat: dict) -> dict:
+    if IMPORTED_CAPTION not in flat:
+        return flat
+    flat = flat.copy()
+    imported = flat.pop(IMPORTED_CAPTION)
+    original = imported["mode"]
+    if original == "mixed_custom":
+        if flat.get(_MODE) == "mixed":
+            flat[_MODE] = original
+    elif flat.get(_MODE) == compatible_mix("mixed", {original: 100}):
+        active = {k: weight for k, weight in flat[_WEIGHTS].items() if weight}
+        if active == {original: 100}:
+            flat[_MODE] = original
+            flat[_WEIGHTS] = imported["weights"]
     return flat
 
 
@@ -177,7 +214,7 @@ def nest(flat: dict) -> dict:
     """{dotted key: value} -> nested TOML dict. Keys mapped to None are dropped, which is how the
     GUI spells "leave this unset" for the `int | None` and `float | None` fields."""
     out: dict = {}
-    for key, value in flat.items():
+    for key, value in _restore_imported_caption(flat).items():
         if value is None:
             continue
         node = out
@@ -191,12 +228,14 @@ def nest(flat: dict) -> dict:
 def prune_defaults(flat: dict) -> dict:
     """Drop every value equal to its dataclass default. `dataset.path` and `train.run_name` are
     kept regardless -- a config without them is not obviously a config."""
-    # `adapter.kind` is always written even at its default: it is the mode selector -- full
-    # finetune vs LoRA vs LoKr -- and a config whose most consequential key is implicit is a config
-    # someone will misread.
+    flat = _restore_imported_caption(flat)
+    # Always write adapter.kind: it distinguishes full finetuning from adapter training.
     keep = {"dataset.path", "train.run_name", "train.model_path", "train.output_dir",
             "adapter.kind"}
     base = defaults(flat.get("optimizer.kind", "adamw"))
+    mode = flat.get("dataset.caption.caption_mode")
+    if mode in MIX_DEFAULTS:
+        base["dataset.caption.mixed_weights"] = MIX_DEFAULTS[mode]
     out = {}
     for key, value in flat.items():
         if value is None:

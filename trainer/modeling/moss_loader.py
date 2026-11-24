@@ -94,16 +94,16 @@ def load_transformer(root, source, dtype):
     return model.to(dtype=dtype)
 
 
+def format_prompt(tokenizer, prompt):
+    return tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False,
+                                         add_generation_prompt=True, enable_thinking=True)
+
+
 @torch.no_grad()
 def encode_prompts(components, prompts, device, max_length):
     rows = []
     for prompt in prompts:
-        text = components.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=True,
-        )
+        text = format_prompt(components.tokenizer, prompt)
         inputs = components.tokenizer(
             text, return_tensors="pt", truncation=True, max_length=max_length
         ).to(device)

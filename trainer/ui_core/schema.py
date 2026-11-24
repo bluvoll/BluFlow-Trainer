@@ -7,6 +7,7 @@ from sys import float_info
 from typing import Callable
 
 from . import editors as F
+from ..data.caption import MIX_DEFAULTS
 
 RAW_GROUP_TITLES: set[str] = set()
 TRANSFORMED_GROUP_TITLES: set[str] = set()
@@ -797,16 +798,19 @@ SPEC: dict[str, Spec] = {
     ),
     "dataset.caption.caption_mode": _spec(
         "Caption mode",
-        "tags = .txt, nl = _nl.txt, tags_nl / nl_tags concatenate in that order, mixed draws per "
-        "sample from the weights below.\n\nText embeddings are never cached, precisely so this can "
-        "vary per epoch.",
-        lambda: F.ChoiceEditor(["tags", "nl", "tags_nl", "nl_tags", "mixed"]),
+        "Mixed uses .txt tags and _nl.txt prose. The two JSON mixes use .txt tags and "
+        "_moss.json prose. Choose the bounding-box mix to include crop-adjusted layouts. "
+        "Long layouts fall back to medium layouts when needed. If no layout fits, the JSON "
+        "mixes use medium prose. Images without JSON use their tags.",
+        lambda: F.ChoiceEditor(
+            ["tags", "nl", "Mixed (tags + NL)", "Tags + JSON captions", "Tags + JSON captions + bounding boxes"],
+            ["tags", "nl", "mixed", "mixed_json", "mixed_json_layout"]),
     ),
     "dataset.caption.mixed_weights": _spec(
         "Mixed weights",
-        "Relative weights, not percentages -- they need not sum to 100. Only used when the mode "
-        "is `mixed`.",
-        lambda: F.WeightsEditor(["tags", "nl", "tags_nl", "nl_tags"]),
+        "Relative chance of drawing each caption format. For a single format, give it 100 and set the others to 0.",
+        lambda: F.WeightsEditor({mode: list(weights) for mode, weights in MIX_DEFAULTS.items()},
+                                labels={"layout": "Boxes + medium", "layout_long": "Boxes + long"}),
     ),
     "dataset.caption.shuffle_tags": _spec(
         "Shuffle tags",
@@ -848,15 +852,16 @@ SPEC: dict[str, Spec] = {
         lambda: F.FloatEditor(0.0, 1.0, 0.05, 2),
     ),
     "dataset.caption.nl_shuffle_sentences": _spec(
-        "Shuffle NL sentences",
-        "Applies to the natural-language caption only.",
-        lambda: F.BoolEditor("Shuffle NL sentences"),
+        "Shuffle prose sentences",
+        "Shuffle sentences in _nl.txt and in short, medium and long JSON prose, including prose "
+        "paired with tags. Structured layouts keep their original wording and box order.",
+        lambda: F.BoolEditor("Shuffle prose sentences"),
         inline_label=True,
     ),
     "dataset.caption.nl_keep_first_sentence": _spec(
-        "Pin first NL sentence",
+        "Pin first prose sentence",
         "Hold sentence one in place while shuffling the rest.",
-        lambda: F.BoolEditor("Pin the first NL sentence"),
+        lambda: F.BoolEditor("Pin the first prose sentence"),
         inline_label=True,
     ),
     # ------------------------------------------------------------------ flow

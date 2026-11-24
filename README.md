@@ -608,6 +608,34 @@ A single dataset folder or multiple subsets can supply images and captions.
 Adding subset rows in the GUI disables the main folder and repeat count;
 subsets replace that source. Each subset can have its own repeat count.
 
+For MOSS, choose the caption sources in **Dataset → Caption mode**. **Mixed
+(tags + NL)** uses the tag file and optional `_nl.txt`. **Tags + JSON captions**
+uses tags and the short, medium, or long prose in `<stem>_moss.json`. **Tags +
+JSON captions + bounding boxes** also offers two layout weights. Each layout
+draw supplies a complete JSON prompt with the chosen scene summary and the
+item descriptions and boxes for the image's actual crop. Images without a
+sidecar use their tags in either JSON mix. For a single format, set its weight
+to 100 and all others to 0. For example, set **Boxes + long** to 100 to
+request a long-summary layout on every draw.
+
+```toml
+[dataset.caption]
+caption_mode = "mixed_json_layout" # Use "mixed_json" for prose without boxes.
+mixed_weights = { tags = 30, tags_moss_long = 20, moss_long_tags = 20, moss_short = 5, moss_long = 5, layout = 10, layout_long = 10 }
+nl_shuffle_sentences = true
+nl_keep_first_sentence = true
+```
+
+Here 10% of caption draws request boxes with a medium summary and 10% request
+boxes with a long summary, before caption dropout. The bbox preset starts at
+20% medium and 0% long. If the long layout exceeds the text token budget, the
+trainer uses the medium layout if it fits, then medium prose. Sentence shuffling
+applies to prose draws, including the prose in a tags-plus-caption draw.
+Structured layout prompts preserve wording, item order, boxes, and transcriptions.
+Older mixed TOMLs with MOSS weights are recognized on load.
+Staged and weighted runs check the sidecar captions and layouts on exact resume.
+Reformatting the JSON is fine. Use weights-only resume when changing the conditioning.
+
 For multiple resolution tiers with different batch sizes, remove the preset's
 single `dataset.resolution` field and apply these overrides:
 

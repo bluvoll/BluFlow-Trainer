@@ -44,7 +44,7 @@ from accelerate.utils import set_seed, DistributedDataParallelKwargs
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ..data.dataset import MageFlowDataset, BucketBatchSampler, collate
+from ..data.dataset import MageFlowDataset, BucketBatchSampler, collate, resume_caption_fields
 from ..modeling.loader import model_load_kwargs, load_components, encode_prompts
 from .config import Config, load_config
 from .flow import flow_loss, hf_loss, prepare_training_flow_batch, effective_timesteps
@@ -323,7 +323,8 @@ class Trainer:
         cfg = self.cfg
         cfg.resolution_schedule.validate(cfg)
         dataset_cfg = replace(cfg.dataset, tier_collapse='repeat') if cfg.resolution_schedule.enabled else cfg.dataset
-        self.dataset = MageFlowDataset(dataset_cfg, caption_seed=cfg.train.seed)
+        from ..data.moss_captions import layout_options
+        self.dataset = MageFlowDataset(dataset_cfg, caption_seed=cfg.train.seed, **layout_options(cfg))
         from ..data.cache_provenance import validate_dataset_caches
         validate_dataset_caches(self.dataset, cfg.train, cfg.dataset.cache_validation)
         from ..data.packed import NativeResolutionBatchSampler, collate_native
@@ -396,7 +397,7 @@ class Trainer:
         if getattr(self.dataset, 'weighted', False) and not cfg.resolution_schedule.enabled:
             import hashlib
             payload = dict(version=2, dataset=asdict(cfg.dataset),
-                           entries=[(str(e.latent_path.resolve()), e.bucket, e.resolution, e.tags, e.nl,
+                           entries=[(str(e.latent_path.resolve()), e.bucket, e.resolution, *resume_caption_fields(e),
                                      (e.path if self.dataset.encode_on_the_fly else e.latent_path).stat().st_size,
                                      (e.path if self.dataset.encode_on_the_fly else e.latent_path).stat().st_mtime_ns)
                                     for e in self.dataset.entries],
@@ -644,7 +645,7 @@ class Trainer:
         cfg = self.cfg
         if cfg.train.caption_variations:
             return self._build_variation_cache()
-        captions = sorted({build_caption(e.tags, e.nl, cfg.dataset.caption, random.Random(0))
+        captions = sorted({build_caption(e.tags, e.nl, cfg.dataset.caption, random.Random(0), getattr(e, "moss", None))
                            for e in self.dataset.entries})
         if any(p.mode == "texture" for p in cfg.curriculum.phases):
             captions = sorted(set(captions) | {cfg.dataset.texture.trigger})

@@ -534,7 +534,9 @@ function Editor({ field, value }: { field: Field; value: any }) {
         value={index < 0 ? 'unknown' : String(index)}
         onChange={(e) => set(values[Number(e.target.value)])}
       >
-        {index < 0 && <option value="unknown">{String(value)} (not in this build)</option>}
+        {index < 0 && (
+          <option value="unknown">{k.imported_labels?.[value] || `${value} (not in this build)`}</option>
+        )}
         {labels.map((text: string, i: number) => (
           <option
             key={i}
@@ -573,24 +575,29 @@ function Editor({ field, value }: { field: Field; value: any }) {
         />
       </div>
     );
-  if (field.kind === 'WeightsEditor')
+  if (field.kind === 'WeightsEditor') {
+    const mode = state?.flat._imported_caption?.mode === 'mixed_custom'
+      ? 'mixed_custom'
+      : state?.flat['dataset.caption.caption_mode'];
     return (
       <div className="weights">
-        {(a[0] || []).map((key: string) => (
+        {(a[0]?.[mode] || []).map((key: string) => (
           <label key={key}>
-            {key}
+            {k.labels?.[key] || key}
             <input
-              aria-label={`${label} ${key}`}
+              aria-label={`${label} ${k.labels?.[key] || key}`}
               type="number"
               min="0"
               max="1000"
+              step="any"
               value={value?.[key] ?? 0}
-              onChange={(e) => set({ ...value, [key]: numeric(e.target.value, true) })}
+              onChange={(e) => set({ ...value, [key]: numeric(e.target.value) })}
             />
           </label>
         ))}
       </div>
     );
+  }
   if (field.kind === 'CheckSetEditor')
     return (
       <div className="check-set">
@@ -742,6 +749,7 @@ export default function FieldRow({ field }: { field: Field }) {
   }));
   if (!state) return null;
   const disabled = state.validation.enabled[field.key] === false;
+  if (field.kind === 'WeightsEditor' && disabled) return null;
   const full = [
     'CurriculumEditor',
     'SubsetEditor',

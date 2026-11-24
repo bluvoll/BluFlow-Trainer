@@ -42,6 +42,46 @@ def test_subset_rows_disable_single_source_and_restore_it(gui):
     assert gui.collect()["dataset.path"] == "/images"
 
 
+def test_caption_mix_switches_visible_weights_and_roundtrips(gui, tmp_path):
+    from trainer.training.config import load_config
+    key = "dataset.caption.caption_mode"
+    weights = gui.editors["dataset.caption.mixed_weights"]
+    mode = gui.editors[key]
+    assert mode.values == ["tags", "nl", "mixed", "mixed_json", "mixed_json_layout"]
+    gui._apply(bridge.defaults() | {"dataset.path": "/images", "train.model_family": "moss_image"})
+    for selected in ("mixed", "mixed_json", "mixed_json_layout"):
+        mode.widget.setCurrentIndex(mode.values.index(selected))
+        assert weights.spins["nl"].isHidden() == (selected != "mixed")
+        assert weights.spins["moss_long"].isHidden() == (selected == "mixed")
+        assert weights.spins["layout_long"].isHidden() == (selected != "mixed_json_layout")
+    weights.spins["layout_long"].setValue(9.5)
+    dest = tmp_path / "captions.toml"
+    bridge.write_toml(dest, gui.collect())
+    cfg = load_config(dest).dataset.caption
+    assert cfg.caption_mode == "mixed_json_layout" and cfg.mixed_weights["layout_long"] == 9.5
+    mode.widget.setCurrentIndex(mode.values.index("mixed"))
+    assert not any(k in gui.collect()["dataset.caption.mixed_weights"] for k in ("layout", "layout_long"))
+
+    for old, selected in [("tags_nl", "mixed"), ("moss_long", "mixed_json"), ("layout_long", "mixed_json_layout")]:
+        raw = {"dataset": {"path": "/images", "caption": {"caption_mode": old}}}
+        gui._apply(bridge.defaults() | bridge.flatten(raw))
+        assert mode.get() == selected and mode.widget.count() == 5
+        assert not weights.spins[old].isHidden() and weights.spins[old].value() == 100
+        assert bridge.prune_defaults(gui.collect())[key] == old
+        weights.spins["tags"].setValue(25)
+        saved = bridge.prune_defaults(gui.collect())
+        assert saved[key] == selected and bridge.IMPORTED_CAPTION not in saved
+
+    raw["dataset"]["caption"] = {"caption_mode": "mixed", "mixed_weights": {"layout": 80, "nl": 20}}
+    gui._apply(bridge.defaults() | bridge.flatten(raw))
+    assert mode.get() == "mixed" and mode.widget.count() == 5
+    assert not weights.spins["layout"].isHidden() and not weights.spins["nl"].isHidden()
+    assert bridge.prune_defaults(gui.collect())[key] == "mixed_custom"
+    mode.widget.setCurrentIndex(mode.values.index("tags"))
+    mode.widget.setCurrentIndex(mode.values.index("mixed"))
+    assert weights.spins["layout"].isHidden()
+
+
 def test_convrot_controls_and_roundtrip(gui, tmp_path):
     import toml
     from trainer.training.config import load_config

@@ -5,7 +5,7 @@ import random
 import math
 from dataclasses import asdict
 from pathlib import Path
-from .dataset import BucketBatchSampler
+from .dataset import BucketBatchSampler, resume_caption_fields
 from ..training.stage_plan import resolve_stage_plan
 
 
@@ -39,7 +39,7 @@ class StagedBatchSampler(BucketBatchSampler):
             if path not in files:
                 st = Path(path).stat()
                 files[path] = (st.st_size, st.st_mtime_ns)
-            entries.append((path, e.bucket, e.resolution, e.tags, e.nl))
+            entries.append((path, e.bucket, e.resolution, *resume_caption_fields(e)))
         payload = dict(
             entries=entries, files=files, budgets=self.budgets,
             resolutions=[s.resolution for s in schedule.stages], batch_size=batch_size,

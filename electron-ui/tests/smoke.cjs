@@ -226,6 +226,26 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   );
   await openFixture('electron-smoke-edited.toml');
   assert.equal(await curriculum.locator('tbody tr').count(), 0);
+  const captionMode = page.getByLabel('Caption mode', { exact: true });
+  assert.deepEqual(await captionMode.locator('option').allTextContents(), [
+    'tags', 'nl', 'Mixed (tags + NL)', 'Tags + JSON captions', 'Tags + JSON captions + bounding boxes',
+  ]);
+  const weight = (name) => page.getByLabel('Mixed weights ' + name, { exact: true });
+  await captionMode.selectOption({ label: 'Mixed (tags + NL)' });
+  await weight('nl').waitFor();
+  assert.equal(await weight('moss_long').count(), 0);
+  await captionMode.selectOption({ label: 'Tags + JSON captions' });
+  await weight('moss_long').waitFor();
+  assert.equal(await weight('nl').count(), 0);
+  assert.equal(await weight('Boxes + medium').count(), 0);
+  await captionMode.selectOption({ label: 'Tags + JSON captions + bounding boxes' });
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat['dataset.caption.mixed_weights'].layout === 20,
+  );
+  await weight('Boxes + long').fill('9.5');
+  await page.waitForFunction(
+    async () => (await window.bluflow.request('state')).flat['dataset.caption.mixed_weights'].layout_long === 9.5,
+  );
   const targetSwitch = page.getByRole('switch', {
     name: 'Image weighting: use target images',
     exact: true,

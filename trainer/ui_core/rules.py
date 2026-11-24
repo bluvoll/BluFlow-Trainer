@@ -2,6 +2,7 @@
 
 import sys
 from .schema import SPEC
+from ..data.caption import MIX_DEFAULTS
 from ..training.optimizer_specs import supports
 
 # Controls that exist but would do nothing in the current combination. Each entry is
@@ -137,7 +138,7 @@ _RULES = {
     # Inert on the no_upscale path -- verified, 256/128/64 give identical buckets.
     "dataset.min_bucket_reso": lambda c: not c.get("dataset.bucket_no_upscale", True),
     "dataset.caption.mixed_weights": lambda c: (
-        c.get("dataset.caption.caption_mode") == "mixed"
+        c.get("dataset.caption.caption_mode") in MIX_DEFAULTS
     ),
     "dataset.caption.shuffle_keep_first_n": lambda c: bool(
         c.get("dataset.caption.shuffle_tags")

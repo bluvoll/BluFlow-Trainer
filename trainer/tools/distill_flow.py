@@ -32,7 +32,8 @@ def sources(paths):
             raise ValueError(
                 "Each data config must have an existing variation cache path"
             )
-        ds = MageFlowDataset(cfg.dataset)
+        from trainer.data.moss_captions import layout_options
+        ds = MageFlowDataset(cfg.dataset, **layout_options(cfg))
         cache = CaptionVariationCache(
             cfg.train.caption_cache_path,
             encoder_fingerprint(cfg, cfg.train.caption_cache_path),

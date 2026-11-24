@@ -69,13 +69,22 @@ function optimisticState(value: State): State {
   const blockLRPending = ['enabled', 'min_lr_mul', 'ranges'].some(
     (key) => pending[`block_lr.${key}`],
   );
+  let validation = blockLRPending ? { ...value.validation, blockLRPreview: null } : value.validation;
+  if (pending['dataset.caption.caption_mode']) {
+    // The backend supplies the new mode's weights. Keep an edit from copying
+    // the previous mode's entire weight table into the new recipe.
+    validation = {
+      ...validation,
+      enabled: { ...validation.enabled, 'dataset.caption.mixed_weights': false },
+    };
+  }
   return {
     ...value,
     flat: {
       ...value.flat,
       ...Object.fromEntries(Object.entries(pending).map(([key, edit]) => [key, edit.value])),
     },
-    validation: blockLRPending ? { ...value.validation, blockLRPreview: null } : value.validation,
+    validation,
   };
 }
 export function accept(result: any, opened = false) {

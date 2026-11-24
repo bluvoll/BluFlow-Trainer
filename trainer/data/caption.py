@@ -11,22 +11,46 @@ exact embedding matches. Latent caching remains independent of either text-encod
 
 from __future__ import annotations
 
+import math
 import random
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-CaptionMode = str  # "tags" | "nl" | "tags_nl" | "nl_tags" | "mixed"
+CaptionMode = str
+LEGACY_VARIANTS = ("tags", "nl", "tags_nl", "nl_tags")
+# Keep medium and layout adjacent so substituting their weights draws matched slots.
+MOSS_FALLBACK = {
+    "tags_moss_long": "tags_nl", "moss_long_tags": "nl_tags",
+    "moss_short": "nl", "moss_long": "nl", "moss_medium": "nl", "layout": "nl", "layout_long": "nl",
+}
+CAPTION_VARIANTS = (*LEGACY_VARIANTS, *MOSS_FALLBACK)
+JSON_MIXES = ("mixed_json", "mixed_json_layout")
+# Consume complete quoted inscriptions before looking for sentence boundaries.
+_QUOTES_OR_BOUNDARIES = re.compile(r'"[^"\n]*"|“[^”\n]*”|(?<=[.!?])\s+|(?<=[.!?]["”’])\s+')
+_JSON_WEIGHTS = dict(tags=30, tags_moss_long=20, moss_long_tags=20, moss_short=5, moss_long=5)
+MIX_DEFAULTS = {
+    "mixed": dict(tags=50, nl=10, tags_nl=20, nl_tags=20),
+    "mixed_json": {**_JSON_WEIGHTS, "moss_medium": 20},
+    "mixed_json_layout": {**_JSON_WEIGHTS, "moss_medium": 0, "layout": 20, "layout_long": 0},
+    # Only exposed when opening an older recipe combining _nl.txt and MOSS variants.
+    "mixed_custom": dict.fromkeys(CAPTION_VARIANTS, 0),
+}
 
-_VARIANTS = ("tags", "nl", "tags_nl", "nl_tags")
+
+def compatible_mix(mode, weights):
+    if mode != "mixed" or not weights or not any(weights.get(k, 0) for k in MOSS_FALLBACK):
+        return mode
+    if any(weights.get(k, 0) for k in LEGACY_VARIANTS if k != "tags"):
+        return "mixed_custom"
+    return "mixed_json_layout" if weights.get("layout") or weights.get("layout_long") else "mixed_json"
 
 
 @dataclass
 class CaptionConfig:
     caption_mode: CaptionMode = "tags"
     # Percentages; normalised automatically, need not sum to 100.
-    mixed_weights: dict[str, float] = field(
-        default_factory=lambda: {"tags": 50, "nl": 10, "tags_nl": 20, "nl_tags": 20}
-    )
+    mixed_weights: dict[str, float] | None = None
 
     shuffle_tags: bool = False
     tag_delimiter: str = ", "
@@ -41,11 +65,26 @@ class CaptionConfig:
     nl_keep_first_sentence: bool = False
 
     def __post_init__(self):
-        if self.caption_mode not in (*_VARIANTS, "mixed"):
+        if self.caption_mode not in (*CAPTION_VARIANTS, *MIX_DEFAULTS):
             raise ValueError(f"unknown caption_mode: {self.caption_mode}")
-        for k in self.mixed_weights:
-            if k not in _VARIANTS:
+        if self.mixed_weights is None:
+            self.mixed_weights = MIX_DEFAULTS.get(self.caption_mode, MIX_DEFAULTS["mixed"]).copy()
+        for k, weight in self.mixed_weights.items():
+            if k not in CAPTION_VARIANTS:
                 raise ValueError(f"unknown mixed_weights key: {k}")
+            if type(weight) not in (int, float) or not math.isfinite(weight) or weight < 0:
+                raise ValueError(f"mixed_weights.{k} must be finite and nonnegative")
+        self.caption_mode = compatible_mix(self.caption_mode, self.mixed_weights)
+        if self.caption_mode in MIX_DEFAULTS:
+            allowed = MIX_DEFAULTS[self.caption_mode]
+            for key, weight in self.mixed_weights.items():
+                if weight and key not in allowed:
+                    raise ValueError(f"{self.caption_mode} does not use mixed_weights.{key}")
+            self.mixed_weights = {k: v for k, v in self.mixed_weights.items() if k in allowed}
+        # GUI editors also serialize unused fields. Keep existing caption-cache identities.
+        self.mixed_weights = {k: v for k, v in self.mixed_weights.items() if k not in MOSS_FALLBACK or v}
+        if self.uses_moss:
+            self.mixed_weights = {k: self.mixed_weights[k] for k in CAPTION_VARIANTS if k in self.mixed_weights}
         if not 0.0 <= self.tag_dropout_percent <= 1.0:
             raise ValueError("tag_dropout_percent must be in [0,1]")
         if not 0.0 <= self.caption_dropout_percent <= 1.0:
@@ -59,6 +98,31 @@ class CaptionConfig:
         if path:
             cfg.protected_tags = load_protected_tags(path)
         return cfg
+
+    def uses(self, variant):
+        return self.caption_mode == variant or (self.caption_mode in MIX_DEFAULTS and self.mixed_weights.get(variant, 0) > 0)
+
+    @property
+    def uses_moss(self):
+        return any(self.uses(k) for k in MOSS_FALLBACK)
+
+    @property
+    def layout_variants(self):
+        if self.uses("layout_long"):
+            return ("layout", "layout_long")  # Keep the medium layout available as a fallback.
+        return ("layout",) if self.uses("layout") else ()
+
+    def without_moss(self):
+        if self.caption_mode in JSON_MIXES:
+            return replace(self, caption_mode="tags", mixed_weights={})
+        if not self.uses_moss:
+            return self
+        weights = dict.fromkeys(LEGACY_VARIANTS, 0)
+        for k, v in self.mixed_weights.items():
+            weights[MOSS_FALLBACK.get(k, k)] += v
+        mode = "mixed" if self.caption_mode == "mixed_custom" else MOSS_FALLBACK.get(self.caption_mode, self.caption_mode)
+        return replace(self, caption_mode=mode,
+                       mixed_weights={k: v for k, v in weights.items() if v})
 
 
 def load_protected_tags(path: str | Path) -> set[str]:
@@ -133,7 +197,7 @@ def process_nl(nl: str, cfg: CaptionConfig, rng: random.Random) -> str:
 
 def select_variant(cfg: CaptionConfig, has_nl: bool, rng: random.Random) -> str:
     """Pick a caption form. Falls back to tags-only when the sample has no NL caption."""
-    if cfg.caption_mode != "mixed":
+    if cfg.caption_mode not in MIX_DEFAULTS:
         variant = cfg.caption_mode
     else:
         weights = {k: v for k, v in cfg.mixed_weights.items() if v > 0}
@@ -147,11 +211,32 @@ def select_variant(cfg: CaptionConfig, has_nl: bool, rng: random.Random) -> str:
     return variant
 
 
+def shuffle_moss_prose(text: str, cfg: CaptionConfig, rng: random.Random) -> str:
+    if not cfg.nl_shuffle_sentences:
+        return text
+    # Keep punctuation on its sentence, including closing quotes. Decimal points
+    # have no following whitespace and stay within the sentence.
+    sentences = []
+    start = 0
+    for match in _QUOTES_OR_BOUNDARIES.finditer(text):
+        if match[0].isspace() and match.end() < len(text):
+            sentences.append(text[start:match.start()])
+            start = match.end()
+    sentences.append(text[start:])
+    first = int(cfg.nl_keep_first_sentence)
+    if len(sentences) - first < 2:
+        return text
+    tail = sentences[first:]
+    rng.shuffle(tail)
+    return " ".join(sentences[:first] + tail)
+
+
 def build_caption(
     tags_text: str,
     nl_text: str | None,
     cfg: CaptionConfig,
     rng: random.Random | None = None,
+    moss: dict[str, str] | None = None,
 ) -> str:
     """Produce the final caption string for one sample.
 
@@ -162,6 +247,8 @@ def build_caption(
     if cfg.caption_dropout_percent > 0 and rng.random() < cfg.caption_dropout_percent:
         return ""
 
+    if moss is None:
+        cfg = cfg.without_moss()
     variant = select_variant(cfg, bool(nl_text), rng)
 
     tags = process_tags(split_tags(tags_text, cfg.tag_delimiter), cfg, rng)
@@ -169,6 +256,19 @@ def build_caption(
 
     if variant == "tags":
         return tags_str
+    if variant in MOSS_FALLBACK:
+        if variant in ("layout", "layout_long"):
+            if variant in moss:
+                return moss[variant]
+            if "layout" in moss:
+                return moss["layout"]
+            return shuffle_moss_prose(moss["medium"], cfg, rng)
+        if variant in ("tags_moss_long", "moss_long_tags"):
+            prose = shuffle_moss_prose(moss["long"], cfg, rng)
+            if not tags_str:
+                return prose
+            return f"{tags_str}. {prose}" if variant == "tags_moss_long" else f"{prose} {tags_str}"
+        return shuffle_moss_prose(moss[variant.removeprefix("moss_")], cfg, rng)
     nl_str = process_nl(nl_text or "", cfg, rng)
     if variant == "nl":
         return nl_str
@@ -179,12 +279,12 @@ def build_caption(
     raise AssertionError(f"unreachable variant {variant}")
 
 
-def read_caption_files(image_path: str | Path) -> tuple[str, str | None]:
+def read_caption_files(image_path: str | Path, *, read_nl=True) -> tuple[str, str | None]:
     """`<stem>.txt` -> tags, `<stem>_nl.txt` -> NL caption (None if absent)."""
     p = Path(image_path)
     tags_path = p.with_suffix(".txt")
     nl_path = p.with_name(p.stem + "_nl.txt")
 
     tags = tags_path.read_text(encoding="utf-8").strip() if tags_path.exists() else ""
-    nl = nl_path.read_text(encoding="utf-8").strip() if nl_path.exists() else None
+    nl = nl_path.read_text(encoding="utf-8").strip() if read_nl and nl_path.exists() else None
     return tags, nl

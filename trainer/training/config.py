@@ -414,6 +414,8 @@ def validate_model_options(cfg):
         raise ValueError('Eye adversarial experiment requires dedicated eye examples and perceptual.weight=0 (LPIPS off)')
     from ..modeling.loader import resolve_model_family
     cfg.train.model_family = resolve_model_family(cfg.train.model_path, cfg.train.model_family)
+    if cfg.dataset.caption.uses_moss and cfg.train.model_family != "moss_image":
+        raise ValueError("MOSS sidecar caption variants require a MOSS-Image model")
     if cfg.block_lr.enabled and (cfg.train.model_family != 'moss_image' or not (
             cfg.adapter.kind in ('none', 'lora', 'lokr') or (cfg.adapter.kind == 'lycoris_lora'
                                          and cfg.adapter.lycoris_algo in ('locon', 'lokr')))):

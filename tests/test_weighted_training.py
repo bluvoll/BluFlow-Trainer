@@ -1,5 +1,6 @@
 """Real weighted data loading, variable epoch sizes and checkpointed model RNG."""
 import copy
+import json
 
 import pytest
 import torch
@@ -7,6 +8,7 @@ from safetensors.torch import save_file
 
 from trainer.data.dataset import DatasetConfig, MageFlowDataset
 from trainer.data.cache import cache_path
+from trainer.data.caption import CaptionConfig
 from trainer.training.train import Trainer
 from test_resolution_schedule import make_trainer, enable_checkpoint_saving
 
@@ -18,7 +20,7 @@ class TinyLatentDataset(MageFlowDataset):
         return sample
 
 
-def weighted_trainer(root, monkeypatch, staged=False):
+def weighted_trainer(root, monkeypatch, staged=False, caption_mode='tags'):
     from trainer.data.bucket import BucketManager
     from trainer.training.resolution_schedule import ResolutionSchedule
     for i in range(9):
@@ -40,7 +42,8 @@ def weighted_trainer(root, monkeypatch, staged=False):
         t.cfg.train.max_steps = None
         t.cfg.train.batch_size = 3
         t.cfg.dataset = DatasetConfig(path=str(root), source='latents', resolution=128,
-                                      min_bucket_reso=64, num_repeats=1.56, cache_validation='off')
+                                      min_bucket_reso=64, num_repeats=1.56, cache_validation='off',
+                                      caption=CaptionConfig(caption_mode=caption_mode))
         if staged:
             t.cfg.resolution_schedule = ResolutionSchedule(enabled=True, unit='epochs', stages=[
                 dict(resolution=64, share=.5), dict(resolution=128, share=.5)])
@@ -69,7 +72,6 @@ def test_weighted_epoch_full_state_resume(tmp_path, monkeypatch, staged, checkpo
     assert not t.accelerator.gradient_state.in_dataloader
     final = copy.deepcopy(t._unwrap(t.transformer).state_dict())
     trace, lr = list(t.trace), list(t.lr_trace)
-    import json
     checkpoint = tmp_path / 'output' / f'staged-test-step{checkpoint_step:06d}-state'
     state = json.loads((checkpoint/'state.json').read_text())['resolution_schedule_state' if staged else 'sampling_state']
     consumed = 0  # cursor is rank-local, without prefetch
@@ -93,3 +95,28 @@ def test_weighted_epoch_full_state_resume(tmp_path, monkeypatch, staged, checkpo
     for key, value in resumed._unwrap(resumed.transformer).state_dict().items():
         torch.testing.assert_close(value, final[key], rtol=0, atol=0)
     resumed.accelerator.free_memory()
+
+
+@pytest.mark.parametrize('staged', [False, True])
+def test_changed_moss_prose_rejects_exact_resume(tmp_path, monkeypatch, staged):
+    path = tmp_path / 'image0_moss.json'
+    doc = {'caption': {'short': 'A boat.', 'medium': 'A little boat.', 'long': 'A boat on a lake.'}}
+    path.write_text(json.dumps(doc))
+    trainer = weighted_trainer(tmp_path, monkeypatch, staged, caption_mode='moss_long')
+    enable_checkpoint_saving(trainer, tmp_path)
+    trainer.train()
+    trainer.accelerator.free_memory()
+    state = str(tmp_path / 'output' / 'staged-test-step000001-state')
+
+    path.write_text(json.dumps(doc, indent=4))
+    resumed = weighted_trainer(tmp_path, monkeypatch, staged, caption_mode='moss_long')
+    enable_checkpoint_saving(resumed, tmp_path)
+    resumed._resume(state)
+    resumed.accelerator.free_memory()
+
+    doc['caption']['long'] = 'A boat on a stormy sea.'
+    path.write_text(json.dumps(doc))
+    changed = weighted_trainer(tmp_path, monkeypatch, staged, caption_mode='moss_long')
+    with pytest.raises(ValueError, match='data/'):
+        changed._resume(state)
+    changed.accelerator.free_memory()

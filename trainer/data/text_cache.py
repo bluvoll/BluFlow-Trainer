@@ -2,6 +2,7 @@
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from .caption import MIX_DEFAULTS
 
 
 def validate_static_captions(cfg):
@@ -16,8 +17,8 @@ def validate_static_captions(cfg):
         )
         if getattr(caption, name)
     ]
-    if caption.caption_mode == "mixed":
-        changing.append("caption_mode=mixed")
+    if caption.caption_mode in MIX_DEFAULTS and sum(w > 0 for w in caption.mixed_weights.values()) > 1:
+        changing.append(f"caption_mode={caption.caption_mode}")
     if changing and not getattr(getattr(cfg, "train", None), "caption_variations", 0):
         raise ValueError(
             "cache_text_embeddings requires fixed captions; disable "
