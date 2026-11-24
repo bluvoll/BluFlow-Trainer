@@ -9,11 +9,12 @@ import torch.multiprocessing as mp
 import pytest
 
 
-def epoch_worker(rank, root, explicit=False, kind='lora'):
+def epoch_worker(rank, root, explicit=False, kind='lora', restart_lr=False):
     from test_resolution_schedule import Samples, enable_checkpoint_saving
     from test_staged_epochs import epoch_trainer
     from test_stage_exposure import fractional_trainer
     factory = fractional_trainer if explicit else epoch_trainer
+    options = dict(kind=kind, restart_lr=True) if restart_lr else dict(kind=kind)
     torch.set_num_threads(1)
     os.environ.update(RANK=str(rank), WORLD_SIZE='2', LOCAL_RANK=str(rank), LOCAL_WORLD_SIZE='2',
                       MASTER_ADDR='127.0.0.1', MASTER_PORT='29587', OMP_NUM_THREADS='1')
@@ -24,7 +25,7 @@ def epoch_worker(rank, root, explicit=False, kind='lora'):
         if rank == 0:
             Samples(root)
         dist.barrier()
-        first = factory(root, kind=kind)
+        first = factory(root, **options)
         first.accelerator.end_training = lambda: None
         enable_checkpoint_saving(first, root)
         first.train()
@@ -33,6 +34,10 @@ def epoch_worker(rank, root, explicit=False, kind='lora'):
         assert first.global_step == first.successful_updates == 8
         assert first.stage_attempts == first.sampler.budgets
         assert first.stage_images == [row['images'] for row in first.sampler.plan]
+        if restart_lr:
+            # Last tier: two warmup updates and two scheduler ticks per update.
+            rate = first.cfg.optimizer.lr
+            assert [groups[0] for groups in first.lr_trace[3:6]] == pytest.approx([rate / 4, rate * .75, rate])
         final = {k: v.detach().clone() for k, v in first._unwrap(first.transformer).state_dict().items()}
         trace = list(first.trace)
         for value in final.values():
@@ -40,7 +45,7 @@ def epoch_worker(rank, root, explicit=False, kind='lora'):
             dist.broadcast(reference, 0)
             torch.testing.assert_close(value, reference, rtol=0, atol=0)
         first.accelerator.free_memory()
-        resumed = factory(root, kind=kind)
+        resumed = factory(root, **options)
         resumed.accelerator.end_training = lambda: None
         enable_checkpoint_saving(resumed, root)
         resumed._resume(str(root/'output'/'staged-test-step000003-state'))
@@ -57,13 +62,21 @@ def epoch_worker(rank, root, explicit=False, kind='lora'):
             dist.destroy_process_group()
 
 
-@pytest.mark.parametrize('explicit', [False, True])
-@pytest.mark.parametrize('kind', ['lora', 'none', 'lokr', 'lycoris_lokr'])
-def test_two_rank_epochs_and_resume(tmp_path, explicit, kind):
+@pytest.fixture
+def gloo_device():
     try:
         dist.ProcessGroupGloo.create_default_device()
     except RuntimeError as exc:
         if 'unsupported gloo device' in str(exc):
             pytest.skip(f'This Torch build cannot create a Gloo transport: {exc}')
         raise
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+@pytest.mark.parametrize('kind', ['lora', 'none', 'lokr', 'lycoris_lokr'])
+def test_two_rank_epochs_and_resume(tmp_path, gloo_device, explicit, kind):
     mp.spawn(epoch_worker, args=(str(tmp_path), explicit, kind), nprocs=2, join=True)
+
+
+def test_two_rank_stage_lr_restart_and_resume(tmp_path, gloo_device):
+    mp.spawn(epoch_worker, args=(str(tmp_path), True, 'lora', True), nprocs=2, join=True)

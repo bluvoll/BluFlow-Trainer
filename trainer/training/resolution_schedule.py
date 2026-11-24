@@ -2,6 +2,13 @@
 from dataclasses import dataclass, field
 import math
 
+MAX_STAGE_LR_MUL = 3.0
+
+
+def stage_warmup_steps(requested: int, updates: int) -> int:
+    """Leave room for the peak and a decay update when the tier is very short."""
+    return min(max(0, requested), max(0, updates - 2))
+
 
 @dataclass
 class ResolutionStage:
@@ -17,8 +24,8 @@ class ResolutionStage:
             raise ValueError('Stage share must be finite and positive')
         if self.epochs is not None and (isinstance(self.epochs, bool) or not math.isfinite(self.epochs) or self.epochs <= 0):
             raise ValueError('Stage epochs must be finite and positive')
-        if isinstance(self.lr_mul, bool) or not math.isfinite(self.lr_mul) or not 0 < self.lr_mul <= 1:
-            raise ValueError('Stage lr_mul must be finite and in (0, 1]')
+        if type(self.lr_mul) not in (int, float) or not 0 < self.lr_mul <= MAX_STAGE_LR_MUL:
+            raise ValueError(f'Stage lr_mul must be greater than zero and at most {MAX_STAGE_LR_MUL} (300%)')
 
 
 @dataclass
@@ -27,12 +34,15 @@ class ResolutionSchedule:
     save_stage_end: bool = True
     stages: list = field(default_factory=list)
     unit: str = 'steps'
+    restart_lr_each_stage: bool = False
 
     def __post_init__(self):
         if self.unit not in ('steps', 'epochs', 'stage_epochs'):
             raise ValueError('resolution_schedule.unit must be steps, epochs or stage_epochs')
         if type(self.enabled) is not bool or type(self.save_stage_end) is not bool:
             raise ValueError('Resolution schedule enabled/save_stage_end must be booleans')
+        if type(self.restart_lr_each_stage) is not bool:
+            raise ValueError('resolution_schedule.restart_lr_each_stage must be a boolean')
         self.stages = [ResolutionStage(**s) if isinstance(s, dict) else s for s in self.stages]
         if not all(isinstance(s, ResolutionStage) for s in self.stages):
             raise ValueError('resolution_schedule.stages must contain resolution/share tables')

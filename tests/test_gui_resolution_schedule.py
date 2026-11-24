@@ -20,11 +20,14 @@ def test_bridge_staged_round_trip_omits_epochs(tmp_path):
         flat['train.attention_backend'] = 'flash_attn_2'
     flat['train.epochs'] = 100
     flat['train.save_every_epochs'] = 2
+    assert not flat['resolution_schedule.restart_lr_each_stage']
+    flat['resolution_schedule.restart_lr_each_stage'] = True
     text = bridge.dump_toml(flat)
     assert 'epochs' not in text
     p = tmp_path/'staged.toml'
     p.write_text(text)
     cfg = load_config(p)
+    assert cfg.resolution_schedule.restart_lr_each_stage
     assert cfg.resolution_schedule.budgets(cfg.train.max_steps) == [112,112,336]
     assert [s.lr_mul for s in cfg.resolution_schedule.stages] == [.8, .9, 1.0]
     assert bridge.validate(flat)[0]
@@ -152,6 +155,8 @@ def test_explicit_stage_epochs_gui(gui, tmp_path):
     assert stages.explicit_epochs
     assert [s['epochs'] for s in stages.get()] == [1., 1., 1.]
     stages.table.cellWidget(0, 1).setValue(.5)
+    assert stages.table.cellWidget(2, 2).maximum() == 300
+    stages.table.cellWidget(2, 2).setValue(150)
     gui._on_edit()
     assert stages.get()[0]['epochs'] == .5
     assert stages.table.horizontalHeaderItem(1).text() == 'Epochs'
@@ -161,6 +166,9 @@ def test_explicit_stage_epochs_gui(gui, tmp_path):
     assert not any(w.isHidden() for w in gui.rows['train.save_every_epochs'])
     path = tmp_path / 'fractional.toml'
     bridge.write_toml(path, gui.collect())
-    assert load_config(path).resolution_schedule.budgets(None) == [.5, 1., 1.]
+    schedule = load_config(path).resolution_schedule
+    assert schedule.budgets(None) == [.5, 1., 1.]
+    assert schedule.stages[2].lr_mul == 1.5
     gui._apply(bridge.defaults() | bridge.flatten(bridge.read_toml(path)))
     assert stages.get()[0]['epochs'] == .5
+    assert stages.table.cellWidget(2, 2).value() == 150

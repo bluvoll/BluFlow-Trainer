@@ -720,7 +720,7 @@ keeps the final partial batch. DDP fills the final batch on every rank by repeat
 samples; very small datasets can therefore receive materially more presentations
 than the requested duration. Accumulation flushes at each complete or partial pass
 boundary, using the actual sample count to normalize gradients. Updates are derived
-from those boundaries; optimizer state and the LR scheduler continue across stages.
+from those boundaries. The optimizer carries its state across stages.
 `save_every_epochs` counts completed passes, including a fractional tail as one
 completed pass. Use stage-boundary saves when that is easier to track.
 
@@ -749,15 +749,25 @@ weights. Small sources remain eligible at later tiers without forced upscaling,
 reusing identical latent files. Cache all tiers before starting. Shares divide
 updates in step mode or whole epochs in epoch-share mode, never wall-clock time.
 
-The GUI's **LR %** column scales the scheduled LR per stage: 80% at 512, 90% at
-768, and 100% at 1024 in the preset. `lr_mul` must be greater than zero and at
-most one; older TOMLs without it keep 100%. This applies to every parameter
-group without compounding across updates. Logs show the LR actually used.
-Warmup and decay still apply: a decaying schedule does not restart or regain its
-configured peak when the 1024 stage begins.
+The **LR %** column in both GUIs scales each parameter group's current scheduled
+LR for that stage. The preset uses 80% at 512px, 90% at 768px, and 100% at
+1024px. To boost a 1280px stage, enter **150** in its LR % cell or set
+`lr_mul = 1.5` in that stage's TOML entry. A scheduled LR of `2e-4` then gives
+an optimizer LR of `3e-4` for that update. Block LR multipliers still apply.
+`lr_mul` must be greater than zero and at most **3.0 (300%)**. It defaults to
+1.0 when omitted.
 
-The optimizer and LR schedule continue across stages, with one warmup. New
-shapes can compile at transitions. In step mode, skipped nonfinite attempts do not advance the
+By default one LR curve spans the run, with one warmup. To give each resolution its own
+curve, enable **Restart LR schedule at each resolution** under **Staged Resolutions**
+or set `restart_lr_each_stage = true` in `[resolution_schedule]`. Each tier runs the
+selected REX, ReREX, cosine, linear, or constant schedule over its own optimizer
+update budget, using its own LR percentage. Warmup counts toward that budget.
+Short tiers cap warmup at `max(0, tier_updates - 2)` so a decaying schedule can
+reach its peak and take a decay step. A one-update tier uses its peak. **Calculate
+dataset exposure** shows the actual warmup for each tier. Weights and optimizer
+moments carry over. Exact resume continues at the saved point on the active curve.
+
+New shapes can compile at transitions. In step mode, skipped nonfinite attempts do not advance the
 stage. Skipped attempts never advance the optimizer or scheduler; repeated nonfinite updates still stop training. Metrics show
 stage progress, images consumed (including skipped attempts), and effective batch.
 Optional stage saves use normal step checkpoint filenames; the final stage uses

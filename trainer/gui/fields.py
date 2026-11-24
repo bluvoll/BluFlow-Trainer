@@ -17,6 +17,7 @@ from sys import float_info
 from PySide6 import QtCore, QtWidgets
 
 from ..training.block_lr import BLOCK_COUNT
+from ..training.resolution_schedule import MAX_STAGE_LR_MUL
 from .widgets import (
     NoScrollComboBox,
     NoScrollDoubleSpinBox,
@@ -1163,9 +1164,9 @@ class ResolutionStagesEditor(_Blockable):
             share.setValue(stage.get('epochs', 1.) if self.explicit_epochs else (stage.get('share') or 0) * 100)
             lr = NoScrollDoubleSpinBox()
             lr.setDecimals(4)
-            lr.setRange(0.0001, 100)
+            lr.setRange(0.0001, MAX_STAGE_LR_MUL * 100)
             lr.setValue(stage.get('lr_mul', 1.0) * 100)
-            lr.setToolTip('Percent of the scheduled LR: 80 means a 20% penalty. Does not restart warmup or decay.')
+            lr.setToolTip('150% uses 1.5 times the current scheduled LR for this stage. Maximum 300%.')
             for col, widget in enumerate((resolution, share, lr)):
                 self.table.setCellWidget(row, col, widget)
                 widget.valueChanged.connect(self._emit)

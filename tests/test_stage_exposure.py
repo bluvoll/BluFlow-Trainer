@@ -18,9 +18,12 @@ def explicit_plan():
         for r, e, lr in [(512, .5, .8), (768, 1.5, .9), (1024, 2.25, 1.)]])
 
 
-def fractional_trainer(root, kind='lora', workers=0):
+def fractional_trainer(root, kind='lora', workers=0, restart_lr=False):
     def setup(t):
         t.cfg.resolution_schedule = explicit_plan()
+        t.cfg.resolution_schedule.restart_lr_each_stage = restart_lr
+        if restart_lr:
+            t.cfg.schedule.warmup_steps = 2
         t.cfg.train.max_steps = None
         t.sampler = StagedBatchSampler(t.dataset, t.cfg.train.batch_size, t.cfg.resolution_schedule,
                                       None, world=t.accelerator.num_processes,

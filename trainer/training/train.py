@@ -48,7 +48,7 @@ from ..data.dataset import MageFlowDataset, BucketBatchSampler, collate
 from ..modeling.loader import model_load_kwargs, load_components, encode_prompts
 from .config import Config, load_config
 from .flow import flow_loss, hf_loss, prepare_training_flow_batch, effective_timesteps
-from .optim import build_optimizer, build_scheduler, estimate_optimizer_bytes
+from .optim import StageLRScheduler, build_optimizer, build_scheduler, estimate_optimizer_bytes
 from .params import (
     apply_adapter,
     build_adapter_param_groups,
@@ -596,8 +596,12 @@ class Trainer:
         # burns through `num_processes`x too fast -- on 2 GPUs a cosine decay reached its floor at
         # the halfway point and trained the rest of the run at lr 0.
         scale = self.accelerator.num_processes
-        schedule = replace(cfg.schedule, warmup_steps=cfg.schedule.warmup_steps * scale)
-        self.scheduler = build_scheduler(self.optimizer, schedule, self.total_steps * scale)
+        if cfg.resolution_schedule.enabled and cfg.resolution_schedule.restart_lr_each_stage:
+            self.stage_lr_scheduler = StageLRScheduler(self.optimizer, cfg.schedule, self.sampler.budgets, scale)
+            self.scheduler = self.stage_lr_scheduler
+        else:
+            schedule = replace(cfg.schedule, warmup_steps=cfg.schedule.warmup_steps * scale)
+            self.scheduler = build_scheduler(self.optimizer, schedule, self.total_steps * scale)
 
     def _prepare(self):
         raw_optimizer = self.optimizer
@@ -1067,6 +1071,8 @@ class Trainer:
         state = dict(identity=self.sampler.identity, stage=self.stage_index, cursor=self.stage_cursor,
                     images=self.stage_images, attempts=self.stage_attempts, plan=self.sampler.plan,
                     lr_multipliers=[s.lr_mul for s in self.cfg.resolution_schedule.stages])
+        if self.cfg.resolution_schedule.restart_lr_each_stage:
+            state['stage_lr_schedule'] = asdict(self.cfg.schedule)
         if self.cfg.resolution_schedule.epoch_based:
             state.update(version=2, unit=self.cfg.resolution_schedule.unit, epoch=self.stage_epoch)
         return state
@@ -1104,6 +1110,8 @@ class Trainer:
             )
 
         for epoch, loader in self._training_passes():
+            if cfg.resolution_schedule.enabled and cfg.resolution_schedule.restart_lr_each_stage:
+                self.stage_lr_scheduler.begin_stage(self.stage_index)
             self.transformer.train()
             t0 = time.time()
             for batch in loader:
@@ -1409,7 +1417,7 @@ class Trainer:
             clock = 'planned updates' if cfg.resolution_schedule.epoch_based else 'successful updates'
             print(f"steps    {self.total_steps} {clock}, {self.accelerator.num_processes} process(es)")
             from .stage_plan import format_stage_plan
-            print(format_stage_plan(self.sampler.plan))
+            print(format_stage_plan(self.sampler.plan, cfg.schedule if cfg.resolution_schedule.restart_lr_each_stage else None))
             for i, (stage, budget) in enumerate(zip(cfg.resolution_schedule.stages, self.sampler.budgets)):
                 duration = f'{self.sampler.epoch_budgets[i]} epochs, ' if cfg.resolution_schedule.epoch_based else ''
                 print(f"         stage {i + 1}: {stage.resolution}px, {duration}{budget} updates, batch/GPU {cfg.train.batch_size[stage.resolution]}, LR x{stage.lr_mul:g}")
@@ -1765,6 +1773,9 @@ class Trainer:
         if staged:
             if staged['identity'] != self.sampler.identity:
                 raise ValueError('Staged resume plan/data/batch size/GPU count changed; use weights-only for a new plan')
+            expected_curve = asdict(self.cfg.schedule) if self.cfg.resolution_schedule.restart_lr_each_stage else None
+            if staged.get('stage_lr_schedule') != expected_curve:
+                raise ValueError('Staged resume LR restart settings changed; use weights-only for a new plan')
             multipliers = [s.lr_mul for s in self.cfg.resolution_schedule.stages]
             if staged.get('lr_multipliers', [1.0] * len(multipliers)) != multipliers:
                 raise ValueError('Staged resume LR multipliers changed; use weights-only for a new plan')

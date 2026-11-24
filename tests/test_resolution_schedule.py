@@ -113,6 +113,7 @@ def test_staged_block_lr_config_and_shared_gui(tmp_path, unit, kind):
     from trainer.ui_core.config import evaluate
     selection = 'kind = "lycoris_lora"\nlycoris_algo = "lokr"' if kind == 'lycoris_lokr' else f'kind = "{kind}"'
     text = config_text().replace('kind = "lora"', selection)
+    text = text.replace('1024', '1280').replace('lr_mul=1.0', 'lr_mul=1.5')
     text = text.replace('enabled = true', f'enabled = true\nunit = "{unit}"')
     if unit == 'epochs':
         text = text.replace('max_steps = 560', 'epochs = 10')
@@ -123,6 +124,7 @@ def test_staged_block_lr_config_and_shared_gui(tmp_path, unit, kind):
     path.write_text(text)
     cfg = load_config(path)
     assert cfg.is_lora == (kind != 'none')
+    assert cfg.resolution_schedule.stages[-1].lr_mul == 1.5
     assert cfg.block_lr.expanded() == [.75]*25 + [1.]*8 + [1.5]*9
     flat = bridge.defaults() | bridge.flatten(bridge.read_toml(path))
     state = evaluate(flat)
@@ -233,6 +235,8 @@ def make_trainer(root, kind='lora', workers=0, gpu=False, accumulation=2, epoch_
 def test_real_loop_transitions_and_prefetch(tmp_path, kind, workers, monkeypatch):
     monkeypatch.setenv('LYCORIS_KERNEL_BACKEND', 'torch')
     t = make_trainer(tmp_path, kind, workers)
+    stages = t.cfg.resolution_schedule.stages
+    stages[-1] = replace(stages[-1], lr_mul=1.5)
     t.train()
     assert t.global_step == t.successful_updates == 5
     assert t.stage_attempts == [1, 1, 3]
@@ -241,9 +245,10 @@ def test_real_loop_transitions_and_prefetch(tmp_path, kind, workers, monkeypatch
     assert t.stage_images == [6, 4, 6]
     assert t.scheduler.scheduler.last_epoch == 5
     schedule = t.scheduler.scheduler
-    assert [lrs[0] for lrs in t.lr_trace] == pytest.approx([
-        schedule.base_lrs[0] * schedule.lr_lambdas[0](step) * mul
-        for step, mul in enumerate([.8, .9, 1., 1., 1.])])
+    for step, mul in enumerate([.8, .9, 1.5, 1.5, 1.5]):
+        assert t.lr_trace[step] == pytest.approx([
+            base * lr_lambda(step) * mul
+            for base, lr_lambda in zip(schedule.base_lrs, schedule.lr_lambdas)])
     t.accelerator.free_memory()
 
 
@@ -364,11 +369,21 @@ def test_cli_rejects_too_short_override_before_building(tmp_path, monkeypatch):
         entry.main()
 
 
-@pytest.mark.parametrize('value', [0, -0.1, 1.1, float('nan'), float('inf'), True])
+@pytest.mark.parametrize('value', [0, -0.1, 3.000001, float('nan'), float('inf'), True, '1.5'])
 def test_invalid_stage_lr_multiplier(value):
     from trainer.training.resolution_schedule import ResolutionStage
     with pytest.raises(ValueError, match='lr_mul'):
         ResolutionStage(512, .2, value)
+
+
+def test_stage_lr_cap_is_inclusive(tmp_path):
+    path = tmp_path / 'stages.toml'
+    recipe = config_text().replace('1024', '1280')
+    path.write_text(recipe.replace('lr_mul=1.0', 'lr_mul=3.0'))
+    assert load_config(path).resolution_schedule.stages[-1].lr_mul == 3.0
+    path.write_text(recipe.replace('lr_mul=1.0', 'lr_mul=3.01'))
+    with pytest.raises(ValueError, match='at most 3.0'):
+        load_config(path)
 
 
 def test_stage_lr_is_absolute_preserves_group_ratios_and_restores_full_rate():
@@ -384,6 +399,92 @@ def test_stage_lr_is_absolute_preserves_group_ratios_and_restores_full_rate():
             t._apply_lr_mul()
             assert [g['lr'] for g in t.optimizer.param_groups] == pytest.approx([1e-3 * mul, 2e-4 * mul])
             assert t.scheduler.get_last_lr() == [1e-3, 2e-4]
+
+
+@pytest.mark.parametrize('kind', ['rex', 'rerex', 'cosine', 'linear', 'constant'])
+@pytest.mark.parametrize('world', [1, 2])
+def test_stage_lr_restarts_match_independent_curves(kind, world):
+    from trainer.training.config import ScheduleConfig
+    from trainer.training.optim import StageLRScheduler, build_scheduler
+
+    def optimizer():
+        return torch.optim.SGD([{'params': [torch.nn.Parameter(torch.ones(1))], 'lr': lr}
+                                for lr in (1e-3, 3e-4)])
+
+    cfg = ScheduleConfig(kind=kind, warmup_steps=5, min_lr_ratio=.05)
+    budgets = [3, 12, 1]
+    opt = optimizer()
+    staged = StageLRScheduler(opt, cfg, budgets, world)
+    for stage, (updates, warmup) in enumerate(zip(budgets, [1, 5, 0])):
+        reference = optimizer()
+        schedule = build_scheduler(reference, replace(cfg, warmup_steps=warmup * world), updates * world)
+        for _ in range(updates):
+            staged.begin_stage(stage)
+            assert [g['lr'] for g in opt.param_groups] == schedule.get_last_lr()
+            opt.step()
+            reference.step()
+            for _ in range(world):
+                staged.step()
+                schedule.step()
+
+
+@pytest.mark.parametrize('mid_stage', [False, True])
+def test_epoch_stage_lr_checkpoint_continues_exactly(tmp_path, mid_stage):
+    def setup(t):
+        t.cfg.resolution_schedule.restart_lr_each_stage = True
+        t.cfg.schedule.warmup_steps = 2
+
+    first = make_trainer(tmp_path, epoch_mode=True, data_setup=setup)
+    enable_checkpoint_saving(first, tmp_path)
+    checkpoint = sum(first.sampler.budgets[:2]) + int(mid_stage)
+    first.train()
+    weights = copy.deepcopy(first._unwrap(first.transformer).state_dict())
+    lrs = first.lr_trace[checkpoint:]
+    first.accelerator.free_memory()
+
+    resumed = make_trainer(tmp_path, epoch_mode=True, data_setup=setup)
+    enable_checkpoint_saving(resumed, tmp_path)
+    state = str(tmp_path / 'output' / f'staged-test-step{checkpoint:06d}-state')
+    resumed.cfg.resolution_schedule.restart_lr_each_stage = False
+    with pytest.raises(ValueError, match='LR restart settings changed'):
+        resumed._resume(state)
+    resumed.cfg.resolution_schedule.restart_lr_each_stage = True
+    resumed._resume(state)
+    resumed.train()
+    assert resumed.lr_trace == lrs
+    for key, value in resumed._unwrap(resumed.transformer).state_dict().items():
+        torch.testing.assert_close(value, weights[key], rtol=0, atol=0)
+    resumed.accelerator.free_memory()
+
+
+@pytest.mark.parametrize('epoch_mode', [False, True])
+def test_stage_lr_used_by_optimizer_after_skipped_update(tmp_path, epoch_mode):
+    from trainer.training.optim import build_scheduler
+    from trainer.training.resolution_schedule import stage_warmup_steps
+
+    def setup(t):
+        t.cfg.resolution_schedule.restart_lr_each_stage = True
+        t.cfg.schedule.warmup_steps = 2
+
+    t = make_trainer(tmp_path, epoch_mode=epoch_mode, data_setup=setup)
+    step = t._step
+    def skip_first(batch):
+        loss, hf = step(batch)
+        return (loss * float('nan') if len(t.trace) == 1 else loss), hf
+    t._step = skip_first
+    t.train()
+    expected = []
+    assert t.skipped_updates == 1
+    for i, (stage, budget) in enumerate(zip(t.cfg.resolution_schedule.stages, t.sampler.budgets)):
+        opt = torch.optim.SGD([torch.nn.Parameter(torch.ones(1))], lr=t.cfg.optimizer.lr)
+        warmup = stage_warmup_steps(t.cfg.schedule.warmup_steps, budget)
+        schedule = build_scheduler(opt, replace(t.cfg.schedule, warmup_steps=warmup), budget)
+        for _ in range(budget - int(i == 0 and epoch_mode)):
+            expected.append(schedule.get_last_lr()[0] * stage.lr_mul)
+            opt.step()
+            schedule.step()
+    assert [rates[0] for rates in t.lr_trace] == pytest.approx(expected)
+    t.accelerator.free_memory()
 
 
 def test_old_staged_config_keeps_unscaled_lr(tmp_path):

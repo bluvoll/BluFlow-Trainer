@@ -290,12 +290,30 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   });
   assert.equal(await page.locator('[data-field="train.max_steps"]').count(), 0);
   await page.getByText('1024px · 30 epochs · effective batch 1', { exact: true }).waitFor();
+  const stageLR = page.getByLabel('Row 3 LR %', { exact: true });
+  assert.equal(await stageLR.getAttribute('max'), '300');
+  await stageLR.fill('301');
+  await page.waitForFunction(async () => {
+    const { validation } = await window.bluflow.request('state');
+    return !validation.valid && validation.error.includes('at most 3.0');
+  });
+  await stageLR.fill('300');
+  await page.waitForFunction(async () => {
+    const state = await window.bluflow.request('state');
+    return state.validation.valid && state.flat['resolution_schedule.stages'][2].lr_mul === 3;
+  });
+  await stageLR.fill('150');
+  await page.waitForFunction(async () => {
+    const state = await window.bluflow.request('state');
+    return state.validation.valid && state.flat['resolution_schedule.stages'][2].lr_mul === 1.5;
+  });
   await page.screenshot({ path: path.join(artifacts, 'staged-epochs.png') });
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForFunction(async () => !(await window.bluflow.request('state')).busy);
   const epochRecipe = fs.readFileSync(path.join(configs, 'electron-smoke-edited.toml'), 'utf8');
   assert.match(epochRecipe, /unit = "epochs"/);
   assert.match(epochRecipe, /epochs = 50/);
+  assert.match(epochRecipe, /lr_mul = 1\.5\b/);
   assert.match(epochRecipe, /num_repeats = 1\.56/);
   assert.doesNotMatch(epochRecipe, /max_steps/);
   const stageValidation = await page.evaluate(
@@ -321,6 +339,8 @@ delete electronEnv.ELECTRON_RUN_AS_NODE;
   await page.waitForFunction(
     async () => !(await window.bluflow.request('state')).flat['resolution_schedule.enabled'],
   );
+  // The timestep preview tests reopen this recipe after the block LR fixture.
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.getByLabel('Search settings', { exact: true }).fill('text cache batch');
   await page.locator('[data-field="train.text_cache_batch_size"]').waitFor();
   await page.getByRole('button', { name: 'Clear search', exact: true }).click();

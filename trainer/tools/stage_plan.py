@@ -19,8 +19,9 @@ def inspect_plan(cfg, world=1):
                               cfg.train.epochs if cfg.resolution_schedule.epoch_based else cfg.train.max_steps,
                               counts, cfg.train.batch_size, world, cfg.train.gradient_accumulation_steps)
     notes = list(dict.fromkeys(str(w.message) for w in caught))
-    return dict(stages=rows, warnings=notes,
-                text=format_stage_plan(rows) + ''.join(f'\nDataset: {n}' for n in notes))
+    restart_schedule = cfg.schedule if cfg.resolution_schedule.restart_lr_each_stage else None
+    text = format_stage_plan(rows, restart_schedule) + ''.join(f'\nDataset: {n}' for n in notes)
+    return dict(stages=rows, warnings=notes, text=text)
 
 
 def main():

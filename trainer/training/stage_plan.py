@@ -1,6 +1,8 @@
 """Resolve stage exposure once using the same rounding rules as the sampler."""
 import math
 
+from .resolution_schedule import stage_warmup_steps
+
 
 def epoch_samples(entries, epochs):
     """Full traversals followed by a deterministic, shuffled partial traversal."""
@@ -43,13 +45,19 @@ def resolve_stage_plan(schedule, total, counts, batches, world=1, accumulation=1
     return rows
 
 
-def format_stage_plan(rows):
-    lines = ['Staged exposure plan (dataset entries include repeats/weighting):',
-             'px | epochs requested | batch/GPU | effective batch | entries | presentations | passes | updates | LR x']
+def format_stage_plan(rows, restart_schedule=None):
+    lines = ['Staged exposure plan (dataset entries include repeats/weighting):']
+    header = 'px | epochs requested | batch/GPU | effective batch | entries | presentations | passes | updates | LR x'
+    if restart_schedule is not None:
+        lines.append(f'{restart_schedule.kind} restarts at each resolution with up to {restart_schedule.warmup_steps} warmup updates.')
+        header += ' | warmup updates'
+    lines.append(header)
     for r in rows:
         epochs = f"{r['epochs']:g}" if r['epochs'] is not None else '-'
         lines.append(f"{r['resolution']} | {epochs} | {r['batch']} | {r['effective_batch']} | {r['entries']} | "
                      f"{r['images']} | {r['equivalent_epochs']:.3f} | {r['steps']} | {r['lr_mul']:g}")
+        if restart_schedule is not None:
+            lines[-1] += f" | {stage_warmup_steps(restart_schedule.warmup_steps, r['steps'])}"
         lines.extend(f"  Note: {note}" for note in r['warnings'])
     lines.append(f"Total: {sum(r['steps'] for r in rows)} planned updates, {sum(r['images'] for r in rows)} presentations.")
     lines.append('Step mode counts successful updates; skipped attempts add exposure. Epoch modes do not extend on skipped updates. '

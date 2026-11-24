@@ -361,6 +361,7 @@ function TableEditor({
       <input
         aria-label={`${curriculum ? 'Phase' : 'Row'} ${index + 1} ${columns[column]}`}
         type="number"
+        max={kind === 'ResolutionStagesEditor' && key === 'lr_mul' ? 300 : undefined}
         step={column === 0 ? '1' : 'any'}
         value={percent ? (row[key] ?? 1) * 100 : (row[key] ?? 1)}
         onChange={(e) => {

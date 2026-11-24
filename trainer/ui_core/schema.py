@@ -288,13 +288,19 @@ SPEC: dict[str, Spec] = {
         lambda: F.BoolEditor("Save stage checkpoints"),
         inline_label=True,
     ),
+    "resolution_schedule.restart_lr_each_stage": _spec(
+        "Restart LR schedule at each resolution",
+        "Run the selected warmup and LR curve within each tier's update budget. Each tier keeps its LR percentage. Short tiers reserve up to two updates after warmup. Weights and optimizer state carry over.",
+        lambda: F.BoolEditor("Restart LR schedule at each resolution"),
+        inline_label=True,
+    ),
     "resolution_schedule.unit": _spec(
         "Stage duration", "Shares split a global budget. Epochs per stage accepts explicit durations such as 0.5 or 2.5; total updates are calculated from the dataset and batching.",
         lambda: F.ChoiceEditor(["Steps", "Epochs", "Epochs per stage"], ["steps", "epochs", "stage_epochs"]),
     ),
     "resolution_schedule.stages": _spec(
         "Resolution stages",
-        "Shares must total 100%; explicit epochs must be positive and can be fractional. An epoch traverses the tier after repeats/weighting. Calculate exposure to see actual presentations including DDP padding. LR % scales the current scheduled LR; warmup and decay continue. Stage tiers must match Dataset resolutions and per-tier batch sizes.",
+        "Shares must total 100%. Explicit epochs must be positive and can be fractional. An epoch traverses the tier after repeats/weighting. Calculate exposure to see actual presentations including DDP padding. LR % scales the current scheduled LR for each stage (e.g. 150% = 1.5×, maximum 300%). Stage tiers must match Dataset resolutions and per-tier batch sizes.",
         lambda: F.ResolutionStagesEditor(),
     ),
     "train.pack_resolutions": _spec(
@@ -1462,6 +1468,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                     "resolution_schedule.enabled",
                     "resolution_schedule.unit",
                     "resolution_schedule.stages",
+                    "resolution_schedule.restart_lr_each_stage",
                     "resolution_schedule.save_stage_end",
                 ],
             ),

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import torch
 
 from .config import OptimizerConfig, ScheduleConfig
 from .optimizer_specs import OPTIMIZERS
+from .resolution_schedule import stage_warmup_steps
 
 # SDNQ optimizers assert that a param group's keys match their schema exactly, so our bookkeeping
 # key has to come off first. Stock torch optimizers tolerate it, but stripping unconditionally
@@ -210,15 +212,7 @@ def _rerex_lambda(decay_steps: int, cfg: ScheduleConfig):
     return lr_lambda
 
 
-def build_scheduler(
-    optimizer: torch.optim.Optimizer, cfg: ScheduleConfig, total_steps: int
-):
-    """A LambdaLR whose multiplier is applied to each group's own peak LR, so the per-component
-    ratios set in `[component_lr]` are preserved across warmup and decay.
-
-    `total_steps` is expected to already be scaled by world size -- Accelerate's wrapper advances
-    the inner scheduler once per process per `step()`. See `Trainer._build_optimizer`.
-    """
+def _schedule_curve(cfg: ScheduleConfig, total_steps: int):
     warmup = max(0, cfg.warmup_steps)
     decay_steps = max(1, total_steps - warmup)
     floor = cfg.min_lr_ratio
@@ -245,7 +239,40 @@ def build_scheduler(
             return (step + 1) / max(1, warmup)
         return decay(step - warmup)
 
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    return lr_lambda
+
+
+def build_scheduler(optimizer: torch.optim.Optimizer, cfg: ScheduleConfig, total_steps: int):
+    """Apply the curve to each group's own peak LR. Steps are in Accelerate scheduler ticks."""
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, _schedule_curve(cfg, total_steps))
+
+
+class StageLRScheduler(torch.optim.lr_scheduler.LambdaLR):
+    """New warmup and decay at each resolution, sharing the optimizer and its group peaks."""
+
+    def __init__(self, optimizer, cfg: ScheduleConfig, budgets: list[int], ticks_per_update: int):
+        curves = []
+        for updates in budgets:
+            warmup = stage_warmup_steps(cfg.warmup_steps, updates)
+            scaled_cfg = replace(cfg, warmup_steps=warmup * ticks_per_update)
+            curves.append(_schedule_curve(scaled_cfg, updates * ticks_per_update))
+
+        # LambdaLR saves the stage and origin with its clock. It recreates plain
+        # functions from the config, so no closures are pickled in a checkpoint.
+        self.stage = 0
+        self.stage_start_tick = 0
+        super().__init__(optimizer, lambda tick: curves[self.stage](tick - self.stage_start_tick))
+
+    def begin_stage(self, stage: int):
+        if stage == self.stage:
+            return
+        self.stage = stage
+        # Epoch stages can end after skipped updates. Use the actual clock at
+        # this boundary rather than assuming every planned update succeeded.
+        self.stage_start_tick = self.last_epoch
+        self._last_lr = [base * curve(self.last_epoch) for base, curve in zip(self.base_lrs, self.lr_lambdas)]
+        for group, lr in zip(self.optimizer.param_groups, self._last_lr):
+            group['lr'] = lr
 
 
 def estimate_optimizer_bytes(num_trainable: int, cfg: OptimizerConfig) -> int:
