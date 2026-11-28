@@ -14,12 +14,12 @@ class QuantizedDDPKwargs(DistributedDataParallelKwargs):
         return {**super().to_kwargs(), "init_sync": False}
 
 
-def configure_quantized_ddp():
+def configure_quantized_ddp(find_unused_parameters=True):
     # DDPOptimizer partitions compiled graphs at gradient-bucket boundaries. Its
     # subgraphs can return aliases of SDNQ tensor subclasses, which AOTAutograd
     # rejects. Compile complete transformer blocks; DDP still reduces gradients.
     torch._dynamo.config.optimize_ddp = False
-    return QuantizedDDPKwargs(find_unused_parameters=True, gradient_as_bucket_view=True)
+    return QuantizedDDPKwargs(find_unused_parameters=find_unused_parameters, gradient_as_bucket_view=True)
 
 
 def configure_moss_checkpoint_ddp(train, world_size):

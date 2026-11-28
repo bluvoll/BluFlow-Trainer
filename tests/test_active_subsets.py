@@ -25,7 +25,7 @@ def recipe(tmp_path):
     Image.new('RGB', (256, 256)).save(active / 'one.png')
     flat = bridge.defaults() | {
         'train.model_family': 'moss_image', 'dataset.path': None,
-        'dataset.source': 'encode',
+        'dataset.source': 'auto',
         'dataset.subsets': [
             {'path': str(tmp_path / 'missing-target'), 'target_images': 0},
             {'path': str(tmp_path / 'missing-repeat'), 'num_repeats': 0},

@@ -5,9 +5,29 @@ from .schema import SPEC
 from ..data.caption import MIX_DEFAULTS
 from ..training.optimizer_specs import supports
 
+def _has_mask_folder(c: dict) -> bool:
+    return bool(
+        (not c.get("dataset.subsets") and c.get("dataset.mask_path"))
+        or any(s.get("mask_path") for s in c.get("dataset.subsets") or [])
+    )
+
+
+def captions_optional(c: dict) -> bool:
+    """Cache images that have no .txt caption. Mirrors `cache_latents.captions_optional`."""
+    return bool(c.get("dataset.allow_missing_captions") or c.get("slider.enabled"))
+
+
 # Controls that exist but would do nothing in the current combination. Each entry is
 # key -> predicate(flat_config) -> enabled.
 _RULES = {
+    "dataset.mask_path": lambda c: not c.get("dataset.subsets"),
+    "dataset.use_masks": _has_mask_folder,
+    **{
+        f"dataset.{option}": (
+            lambda c: _has_mask_folder(c) and bool(c.get("dataset.use_masks"))
+        )
+        for option in ("mask_outside_weight", "mask_dilate_px", "mask_feather_px")
+    },
     **{
         f"paired_texture.{option}": (
             lambda c: float(c.get("paired_texture.scale") or 0) > 0
@@ -46,6 +66,17 @@ _RULES = {
         )
     },
     **{
+        f"slider.{option}": (lambda c: bool(c.get("slider.enabled")))
+        for option in (
+            "target_class",
+            "positive_prompt",
+            "negative_prompt",
+            "anchor_class",
+            "guidance_strength",
+            "anchor_strength",
+        )
+    },
+    **{
         f"self_flow.{option}": (lambda c: bool(c.get("self_flow.enabled")))
         for option in (
             "ema_dtype",
@@ -68,6 +99,7 @@ _RULES = {
         bool(c.get("flow.cabal_shift"))
         and c.get("flow.timestep_sample_method") != "moss"
     ),
+    "flow.res_shift": lambda c: True,
     **{
         f"flow.moss_{option}": (
             lambda c: c.get("flow.timestep_sample_method") == "moss"
@@ -134,7 +166,7 @@ _RULES = {
         and bool(c.get("train.activation_offload_pin_memory"))
     ),
     "dataset.resolution": lambda c: not c.get("dataset.resolutions"),
-    "dataset.min_source_area": lambda c: bool(c.get("dataset.resolutions")),
+    "dataset.min_source_area": lambda c: True,
     # Inert on the no_upscale path -- verified, 256/128/64 give identical buckets.
     "dataset.min_bucket_reso": lambda c: not c.get("dataset.bucket_no_upscale", True),
     "dataset.caption.mixed_weights": lambda c: (
@@ -208,7 +240,7 @@ _RULES = {
                 c.get("adapter.kind") in ("none", "lora", "lokr")
                 or (
                     c.get("adapter.kind") == "lycoris_lora"
-                    and c.get("adapter.lycoris_algo") in ("locon", "lokr")
+                    and c.get("adapter.lycoris_algo") in ("locon", "lokr", "dora")
                 )
             )
         )
@@ -218,6 +250,7 @@ _RULES = {
     "adapter.rank": lambda c: c.get("adapter.kind") != "none",
     "adapter.alpha": lambda c: c.get("adapter.kind") != "none",
     "adapter.dropout": lambda c: c.get("adapter.kind") != "none",
+    "adapter.loraplus_lr_ratio": lambda c: c.get("adapter.kind") == "lora",
     "adapter.components": lambda c: c.get("adapter.kind") != "none",
     "adapter.lokr_factor": lambda c: (
         c.get("adapter.kind") == "lokr"
@@ -238,6 +271,20 @@ _RULES = {
     "train.compile_regional": lambda c: bool(c.get("train.compile")),
     "train.pack_resolutions": lambda c: (
         sys.platform != "win32" or c.get("train.attention_backend") == "flash_attn_2"
+    ),
+    "train.pack_mode": lambda c: (
+        bool(c.get("train.pack_resolutions"))
+        and not bool(c.get("resolution_schedule.enabled"))
+    ),
+    "train.pack_token_budget": lambda c: (
+        bool(c.get("train.pack_resolutions"))
+        and c.get("train.pack_mode", "samples") == "tokens"
+        and not bool(c.get("resolution_schedule.enabled"))
+    ),
+    "train.batch_size": lambda c: not (
+        bool(c.get("train.pack_resolutions"))
+        and c.get("train.pack_mode", "samples") == "tokens"
+        and not bool(c.get("resolution_schedule.enabled"))
     ),
     "train.moss_checkpoint_inside_compile": lambda c: (
         c.get("train.model_family") in ("auto", "moss_image")

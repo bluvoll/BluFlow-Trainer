@@ -1,16 +1,17 @@
 """Narrow compatibility fixes for the tested SDNQ release."""
 from importlib.metadata import version
+from packaging.version import Version
 
 
 def fix_training_tensor_detach():
-    """Keep SDNQ 0.2.9's detach metadata construction out of Dynamo tracing.
+    """Keep SDNQ 0.2.9+ detach metadata construction out of Dynamo tracing.
 
     Eager checkpoint recomputation around a compiled INT8 block detaches the
     trainable SDNQTensor saved by its autograd function. Tracing the dispatch
     handler can flatten the new wrapper before __init__ sets sdnq_dequantizer.
     Only the detach handler stays eager; matmul and backward kernels still compile.
     """
-    if version('sdnq') != '0.2.9':
+    if Version(version('sdnq')) < Version('0.2.9'):
         return False
     import torch
     from sdnq.training import tensor

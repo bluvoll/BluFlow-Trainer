@@ -12,7 +12,17 @@ from functools import lru_cache
 import torch
 
 
-@lru_cache(maxsize=32)
+def effective_moss_mu(mu=-1.09, latent_h=64.0, latent_w=64.0, res_shift=False):
+    """Anchor MOSS normal mean at 1024px (4096 latent tokens); scale by sqrt(N / 4096)."""
+    if not res_shift:
+        return float(mu)
+    tokens = float(latent_h) * float(latent_w)
+    if not math.isfinite(tokens) or tokens <= 0:
+        raise ValueError(f"Invalid latent grid {latent_h}x{latent_w} for resolution-aware MOSS shift")
+    return round(float(mu) - 0.5 * math.log(tokens / 4096.0), 8)
+
+
+@lru_cache(maxsize=256)
 def probability_table(mu=-1.09, std=0.95, cutoff=0.95, uniform_mix=0.01,
                       p_full=0.0, steps=1000):
     """Return CPU FP32 probabilities; callers must not mutate this cached tensor.
@@ -45,15 +55,16 @@ def probability_table(mu=-1.09, std=0.95, cutoff=0.95, uniform_mix=0.01,
     return torch.tensor(probabilities, dtype=torch.float32)
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=256)
 def _cdf(mu, std, cutoff, uniform_mix, p_full, steps):
     cdf = probability_table(mu, std, cutoff, uniform_mix, p_full, steps).cumsum(0)
     cdf[-1] = 1.0
     return cdf
 
 
-def inverse_cdf(quantiles, cfg):
-    cdf = _cdf(cfg.moss_mu, cfg.moss_std, cfg.moss_cutoff, cfg.moss_uniform_mix,
+def inverse_cdf(quantiles, cfg, latent_h=64.0, latent_w=64.0):
+    mu = effective_moss_mu(cfg.moss_mu, latent_h, latent_w, getattr(cfg, "res_shift", False))
+    cdf = _cdf(mu, cfg.moss_std, cfg.moss_cutoff, cfg.moss_uniform_mix,
                cfg.moss_p_full, cfg.moss_steps).to(quantiles.device)
     indices = torch.searchsorted(cdf, quantiles.contiguous()).clamp_max(cfg.moss_steps - 1)
     return (indices.float() + 1) / cfg.moss_steps

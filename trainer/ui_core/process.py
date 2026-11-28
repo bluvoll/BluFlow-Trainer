@@ -91,12 +91,24 @@ def train_launch(
         "-u",
         "-m",
         "accelerate.commands.launch",
+        "--num_machines",
+        "1",
         "--num_processes",
         str(num_processes),
+        "--mixed_precision",
+        "no",
+        "--dynamo_backend",
+        "no",
+        "--gpu_ids",
+        "all",
+    ]
+    if num_processes > 1:
+        argv.append("--multi_gpu")
+    argv.extend([
         "-m",
         "trainer.training.train",
         str(config_path),
-    ]
+    ])
     label = f"train ({num_processes} GPU{'s, DDP' if num_processes > 1 else ''})"
     return Launch(argv, label)
 
@@ -150,10 +162,12 @@ def cache_launch(
     overwrite: bool = False,
     dry_run: bool = False,
     gpus: str = "",
+    devices: str = "",
     vae_path: str | None = None,
     flux2_vae: bool = False,
     model_family: str = "auto",
     cache_validation: str = "warn",
+    allow_missing_captions: bool = False,
 ) -> Launch:
     argv = [
         _python(),
@@ -181,8 +195,9 @@ def cache_launch(
         argv.extend(["--model-family", model_family])
     if flux2_vae:
         argv.append("--flux2-vae")
-    if gpus and "," in gpus:
-        argv.extend(["--devices", gpus])
+    devices_arg = devices or gpus
+    if devices_arg and "," in devices_arg:
+        argv.extend(["--devices", devices_arg])
     if upscale:
         argv.append("--upscale")
     if multires_training:
@@ -191,6 +206,8 @@ def cache_launch(
         argv.append("--overwrite")
     if dry_run:
         argv.append("--dry-run")
+    if allow_missing_captions:
+        argv.append("--allow-missing-captions")
     tiers = "/".join(str(r) for r in resolutions)
     return Launch(
         argv,
@@ -357,14 +374,20 @@ class ProcessWorker(Thread):
                     # the GPU -- said out loud rather than left for the user to find in nvidia-smi.
                     self.process.terminate()
             else:
-                os.killpg(self.process.pid, signal.SIGTERM)
+                try:
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 if IS_WINDOWS:
                     self.process.kill()
                 else:
-                    os.killpg(self.process.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 self.process.wait()
             if IS_WINDOWS and not killed_tree:
                 self.logSignal.emit(

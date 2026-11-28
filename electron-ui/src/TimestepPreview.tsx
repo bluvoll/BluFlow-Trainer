@@ -154,7 +154,10 @@ function IsometricDistribution({ curves }: { curves: ResolutionDistribution[] })
 export default function TimestepPreview() {
   const state = useStore((value) => value.state);
   const distribution = state?.validation.distribution;
-  const dynamic = state?.flat['flow.cabal_shift'] || state?.flat['flow.flux_shift'];
+  const dynamic =
+    state?.flat['flow.cabal_shift'] ||
+    state?.flat['flow.flux_shift'] ||
+    state?.flat['flow.res_shift'];
   if (state && dynamic && state.validation.resolutionDistributions.length) {
     return (
       <div className="distribution" aria-label="Timestep distribution">

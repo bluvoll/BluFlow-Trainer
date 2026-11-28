@@ -11,7 +11,7 @@ from trainer.training.quant import QUANT_PRESETS
 
 
 @pytest.mark.parametrize('preset',['standard','balanced','fast'])
-@pytest.mark.parametrize('kind,algo',[('lycoris_lora','locon'),('lora','locon'),('lokr','locon'),('lycoris_lora','lokr')])
+@pytest.mark.parametrize('kind,algo',[('lycoris_lora','locon'),('lora','locon'),('lokr','locon'),('lycoris_lora','lokr'),('lycoris_lora','dora')])
 def test_preset_controls_save_and_reload(monkeypatch,tmp_path,preset,kind,algo):
     app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     monkeypatch.setattr(TrainingGUI,'_load_presets',lambda self,**kw:None)

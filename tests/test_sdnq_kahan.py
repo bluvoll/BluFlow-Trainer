@@ -1,5 +1,6 @@
 """Numerical regressions for SDNQ's FP32 and weight-decay compensation."""
 from importlib.metadata import version
+from packaging.version import Version
 
 import pytest
 import torch
@@ -7,7 +8,7 @@ import torch
 from trainer.training.config import OptimizerConfig
 from trainer.training.optim import build_optimizer
 
-pytestmark = pytest.mark.skipif(version('sdnq') != '0.2.9', reason='SDNQ 0.2.9 migration regression')
+pytestmark = pytest.mark.skipif(Version(version('sdnq')) < Version('0.2.9'), reason='SDNQ 0.2.9+ migration regression')
 
 
 @pytest.mark.parametrize('quantized_buffers', [False, True])
@@ -43,7 +44,7 @@ def test_compensated_value_includes_decay_after_normalization(dtype, cautious):
     from sdnq.optim import optimizer, utils
 
     from trainer.training.sdnq_compat import fix_kahan_weight_decay
-    assert fix_kahan_weight_decay()
+    assert fix_kahan_weight_decay() is (version('sdnq') == '0.2.9')
     torch.manual_seed(42)
     p = torch.nn.Parameter(torch.randn(32, 32, dtype=dtype))
     residual = torch.zeros_like(p)

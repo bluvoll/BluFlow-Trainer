@@ -264,7 +264,7 @@ def test_schedule_stage_and_curriculum_multiply_without_compounding(schedule, st
         sched.step()
 
 
-@pytest.mark.parametrize('family,kind,algo', [('mage_flow', 'lora', 'locon'), ('mage_flow', 'lokr', 'locon'), ('moss_image', 'lycoris_lora', 'dora')])
+@pytest.mark.parametrize('family,kind,algo', [('mage_flow', 'lora', 'locon'), ('mage_flow', 'lokr', 'locon'), ('flux3', 'lora', 'locon')])
 def test_unsupported_modes_rejected(family, kind, algo):
     from trainer.data.dataset import DatasetConfig
     cfg = Config(dataset=DatasetConfig(path='/images'))
@@ -273,6 +273,81 @@ def test_unsupported_modes_rejected(family, kind, algo):
     cfg.block_lr = plan()
     with pytest.raises(ValueError, match='block LR'):
         validate_model_options(cfg)
+
+
+def test_lycoris_dora_block_lr_groups_dora_scale_and_freezes_zero_block():
+    from trainer.data.dataset import DatasetConfig
+    cfg = Config(dataset=DatasetConfig(path='/images'))
+    cfg.train.model_family = 'moss_image'
+    cfg.adapter = adapter_config('lycoris_lora', lycoris_algo='dora', rank=2, alpha=2, dtype='bfloat16')
+    cfg.block_lr = plan(0.0, 1.5)
+    validate_model_options(cfg)
+
+    model = tiny()
+    model.configure_execution(False)
+    apply_adapter(model, adapter_config('lycoris_lora', lycoris_algo='dora', rank=2, alpha=2,
+                                        moss_train_text_refiner=False))
+    report = build_adapter_param_groups(model, ComponentLRs(), 1e-3, block_lr=plan(0.0, 1.5))
+    assert not any(n.startswith('layers.0.') and p.requires_grad for n, p in model.named_parameters())
+    b1_dora = [n for n, p in model.named_parameters() if n.startswith('layers.1.') and 'dora_scale' in n and p.requires_grad]
+    assert len(b1_dora) == 6
+    assert all(g['lr'] == pytest.approx(1.5e-3) for g in report.groups)
+
+
+def test_peft_loraplus_composes_with_block_lr_and_gui_rules(tmp_path):
+    from trainer.gui import bridge
+    from trainer.ui_core.config import evaluate, normalize
+
+    # Reject non-PEFT adapters or non-positive ratio.
+    with pytest.raises(ValueError, match='PEFT LoRA'):
+        AdapterConfig(kind='lycoris_lora', loraplus_lr_ratio=4.0)
+    with pytest.raises(ValueError, match='finite and > 0'):
+        AdapterConfig(kind='lora', loraplus_lr_ratio=0.0)
+
+    model = tiny()
+    model.configure_execution(False)
+    apply_adapter(model, AdapterConfig(kind='lora', rank=2, alpha=2, moss_train_text_refiner=False))
+    report = build_adapter_param_groups(
+        model, ComponentLRs(), 1e-4, block_lr=plan(0.0, 0.5), loraplus_lr_ratio=4.0
+    )
+    # Block 0 frozen for both lora_A and lora_B.
+    assert not any(n.startswith('layers.0.') and p.requires_grad for n, p in model.named_parameters())
+    param_to_lr = {id(p): g['lr'] for g in report.groups for p in g['params']}
+    a_lrs = {param_to_lr[id(p)] for n, p in model.named_parameters() if n.startswith('layers.1.') and '.lora_A.' in n}
+    b_lrs = {param_to_lr[id(p)] for n, p in model.named_parameters() if n.startswith('layers.1.') and '.lora_B.' in n}
+    assert len(a_lrs) == 1 and next(iter(a_lrs)) == pytest.approx(5e-5)
+    assert len(b_lrs) == 1 and next(iter(b_lrs)) == pytest.approx(2e-4)
+
+    # Scheduler preserves 4:1 ratio across steps.
+    opt = torch.optim.SGD(report.groups)
+    sched = build_scheduler(opt, ScheduleConfig(kind='cosine', warmup_steps=1), 6)
+    checked = 0
+    for _ in range(5):
+        opt.step()
+        sched.step()
+        lrs = sorted({round(g['lr'], 12) for g in opt.param_groups})
+        if lrs[0] > 0:
+            assert len(lrs) == 2 and lrs[1] / lrs[0] == pytest.approx(4.0)
+            checked += 1
+    assert checked >= 3
+
+    # GUI rules, normalize reset, and TOML round-trip.
+    flat = bridge.defaults() | {
+        'dataset.path': '/images',
+        'train.model_family': 'moss_image',
+        'adapter.kind': 'lora',
+        'adapter.loraplus_lr_ratio': 3.5,
+    }
+    ev = evaluate(flat)
+    assert ev['valid'] and ev['enabled']['adapter.loraplus_lr_ratio'] is True
+    assert 'LoRA+ x3.5' in ev['summary']
+    p = tmp_path / 'loraplus.toml'
+    bridge.write_toml(p, flat)
+    assert load_config(p).adapter.loraplus_lr_ratio == pytest.approx(3.5)
+
+    switched = normalize(flat | {'adapter.kind': 'lycoris_lora'}, flat)
+    assert switched['adapter.loraplus_lr_ratio'] == 1.0
+    assert evaluate(switched)['enabled']['adapter.loraplus_lr_ratio'] is False
 
 
 @pytest.mark.parametrize('kind', ['lora', 'none'])

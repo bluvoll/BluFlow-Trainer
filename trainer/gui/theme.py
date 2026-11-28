@@ -12,24 +12,24 @@ from PySide6 import QtGui, QtWidgets
 
 @dataclass(frozen=True, slots=True)
 class Theme:
-    # Surfaces: deliberately close in value, from application to raised control.
-    window: str = "#11151c"
-    nested_group: str = "#11141d"
-    deeply_nested: str = "#0b0e14"
-    surface: str = "#12161e"
-    surface_raised: str = "#181d27"
-    surface_hover: str = "#202633"
-    border: str = "#2b3242"
-    border_muted: str = "#1b202b"
+    # Surfaces: clear tonal separation from window canvas to raised interactive controls.
+    window: str = "#0e1219"
+    nested_group: str = "#121722"
+    deeply_nested: str = "#090c11"
+    surface: str = "#151b27"
+    surface_raised: str = "#1c2333"
+    surface_hover: str = "#252e42"
+    border: str = "#2d364a"
+    border_muted: str = "#1c2230"
 
     # Content and interaction.
-    text: str = "#e6e9f0"
-    text_muted: str = "#8991a7"
-    text_disabled: str = "#50586b"
-    accent: str = "#c1845b"
-    accent_hover: str = "#d59a72"
-    accent_deep: str = "#805039"
-    accent_alt: str = "#c1845b"
+    text: str = "#eaeef7"
+    text_muted: str = "#919bb3"
+    text_disabled: str = "#525b70"
+    accent: str = "#d08c5e"
+    accent_hover: str = "#e0a276"
+    accent_deep: str = "#8f5634"
+    accent_alt: str = "#d08c5e"
     danger: str = "#f05b72"
     danger_hover: str = "#ff7187"
     success: str = "#49d98a"
@@ -72,32 +72,32 @@ QWidget {{
 #TrainingGUI, QDialog, QMessageBox {{ background-color: {t.window}; }}
 QLabel {{ background-color: transparent; }}
 QWidget[uiRole="transparent"], QWidget[uiRole="chartOverlay"] {{ background: transparent; }}
-QWidget[uiRole="panel"] {{ background: {t.canvas}; border: 1px solid {t.border}; border-radius: 4px; }}
-QWidget[uiRole="deepPanel"] {{ background: {t.deeply_nested}; border: 1px solid {t.border}; border-radius: 4px; }}
+QWidget[uiRole="panel"] {{ background: {t.canvas}; border: 1px solid {t.border}; border-radius: 6px; }}
+QWidget[uiRole="deepPanel"] {{ background: {t.deeply_nested}; border: 1px solid {t.border}; border-radius: 6px; }}
 QWidget[uiRole="navigation"] {{ background: {t.window}; border-bottom: 1px solid {t.border}; }}
 QFrame[uiRole="mainFrame"] {{ background: {t.window}; border: 1px solid {t.border}; border-top: none; }}
 QWidget[uiRole="footer"] {{ background: {t.window}; border-top: 1px solid {t.border}; }}
-QLabel[uiRole="preview"] {{ background: {t.canvas}; border: 1px solid {t.border}; }}
-QListWidget[uiRole="quickFocus"] {{ background: {t.surface}; }}
-QWidget[uiRole="datasetEntry"] {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 5px; }}
+QLabel[uiRole="preview"] {{ background: {t.canvas}; border: 1px solid {t.border}; border-radius: 6px; }}
+QListWidget[uiRole="quickFocus"] {{ background: {t.surface}; border-radius: 6px; }}
+QWidget[uiRole="datasetEntry"] {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 6px; }}
 QWidget[uiRole="datasetEntry"][selected="true"] {{ background: {t.surface_hover}; border-color: {t.accent_alt}; }}
 
 QGroupBox {{
     background-color: {t.chart};
     border: 1px solid {t.border};
-    border-radius: 6px;
+    border-radius: 8px;
     margin-top: 16px;
-    padding: 10px 8px 8px 8px;
+    padding: 12px 10px 10px 10px;
     color: {t.text_muted};
     font-size: 8pt;
 }}
 QGroupBox[uiRole="section"] {{ background-color: {t.surface}; }}
-QGroupBox[collapsible="true"] {{ margin-top: 0; padding: 2px; }}
-QGroupBox[collapsible="true"] QToolButton {{ text-align: left; border: none; padding: 5px; color: {t.accent_alt}; font-weight: bold; }}
+QGroupBox[collapsible="true"] {{ margin-top: 0; padding: 3px; }}
+QGroupBox[collapsible="true"] QToolButton {{ text-align: left; border: none; padding: 6px; color: {t.accent_alt}; font-weight: bold; }}
 QGroupBox[collapsible="true"][semanticColor="transformed"] QToolButton {{ color: {t.warning}; }}
 QGroupBox[uiRole="flat"] {{ margin-top: 0; padding: 0; }}
 QGroupBox QGroupBox {{ background-color: {t.nested_group}; }}
-QGroupBox[groupSurface="inner"] {{ background-color: #11141d; }}
+QGroupBox[groupSurface="inner"] {{ background-color: {t.nested_group}; }}
 QGroupBox[density="compact"] {{ font-size: 8pt; }}
 QGroupBox[density="compact"] QPushButton {{ padding: 3px 6px; min-height: 22px; }}
 QGroupBox[density="compact"] QLineEdit,
@@ -123,17 +123,17 @@ QGroupBox[semanticColor="raw"]:disabled::title,
 QGroupBox[semanticColor="transformed"]:disabled::title {{ color: {t.text_disabled}; }}
 
 QPushButton {{
-    background: {t.surface_raised}; border: 1px solid {t.border}; border-radius: 4px;
-    color: {t.text}; padding: 4px 9px; min-height: 20px; max-height: 32px;
+    background: {t.surface_raised}; border: 1px solid {t.border}; border-radius: 6px;
+    color: {t.text}; padding: 5px 10px; min-height: 20px; max-height: 32px;
 }}
-QPushButton:hover {{ border-color: {t.accent}; color: {t.accent}; }}
-QPushButton:pressed, QPushButton:checked {{ background: {t.accent_deep}; border-color: {t.accent_deep}; color: white; }}
-QPushButton[semanticColor="raw"]:hover {{ border-color: {t.accent_alt}; color: {t.accent_alt}; }}
+QPushButton:hover {{ background: {t.surface_hover}; border-color: {t.accent}; color: {t.accent_hover}; }}
+QPushButton:pressed, QPushButton:checked {{ background: {t.accent_deep}; border-color: {t.accent}; color: white; }}
+QPushButton[semanticColor="raw"]:hover {{ border-color: {t.accent_alt}; color: {t.accent_hover}; }}
 QPushButton[semanticColor="raw"]:pressed,
-QPushButton[semanticColor="raw"]:checked {{ background: {t.accent_deep}; border-color: {t.accent_deep}; color: white; }}
-QPushButton[semanticColor="transformed"]:hover {{ border-color: {t.warning}; color: {t.warning}; }}
+QPushButton[semanticColor="raw"]:checked {{ background: {t.accent_deep}; border-color: {t.accent_alt}; color: white; }}
+QPushButton[semanticColor="transformed"]:hover {{ border-color: {t.warning}; color: {t.warning_hover}; }}
 QPushButton[semanticColor="transformed"]:pressed,
-QPushButton[semanticColor="transformed"]:checked {{ background: {t.warning_deep}; border-color: {t.warning_deep}; color: white; }}
+QPushButton[semanticColor="transformed"]:checked {{ background: {t.warning_deep}; border-color: {t.warning}; color: white; }}
 QPushButton:disabled {{ color: {t.text_disabled}; background: {t.window}; border-color: {t.border_muted}; }}
 QPushButton[uiRole="icon"] {{ padding: 0; min-width: 24px; max-width: 32px; font-weight: bold; }}
 QPushButton[uiRole="compact"] {{ padding: 4px; font-size: 8pt; }}
@@ -143,22 +143,33 @@ QPushButton[uiRole="segmentRight"] {{
     background: {t.accent_deep}; color: white; font-weight: bold;
 }}
 QPushButton[uiRole="segmentRight"]:hover {{ background: {t.accent}; color: white; }}
-QPushButton[uiRole="accent"], #StartButton {{ background: {t.accent_deep}; color: white; border-color: {t.accent_deep}; font-weight: bold; }}
-QPushButton[uiRole="accent"]:hover, #StartButton:hover {{ background: {t.accent}; color: white; }}
+QPushButton[uiRole="accent"], #StartButton {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {t.accent}, stop:1 {t.accent_deep});
+    color: white; border-color: {t.accent}; font-weight: bold;
+}}
+QPushButton[uiRole="accent"]:hover, #StartButton:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {t.accent_hover}, stop:1 {t.accent});
+    border-color: {t.accent_hover}; color: white;
+}}
 QPushButton[semanticColor="raw"][uiRole="accent"],
 QPushButton[semanticColor="raw"][uiRole="segmentRight"] {{ background: {t.accent_deep}; color: white; border-color: {t.accent_deep}; }}
 QPushButton[semanticColor="transformed"][uiRole="accent"],
 QPushButton[semanticColor="transformed"][uiRole="segmentRight"] {{ background: {t.warning_deep}; color: white; border-color: {t.warning_deep}; }}
-QPushButton[uiRole="danger"], #StopButton {{ background: {t.danger}; color: white; border-color: {t.danger}; font-weight: bold; }}
-QPushButton[uiRole="danger"]:hover, #StopButton:hover {{ background: {t.danger_hover}; color: white; }}
+QPushButton[uiRole="danger"], #StopButton {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {t.danger_hover}, stop:1 {t.danger});
+    color: white; border-color: {t.danger}; font-weight: bold;
+}}
+QPushButton[uiRole="danger"]:hover, #StopButton:hover {{ background: {t.danger_hover}; color: white; border-color: {t.danger_hover}; }}
 QPushButton[uiRole="warning"] {{ background: {t.warning_deep}; color: white; border-color: {t.warning_deep}; font-weight: bold; }}
 QPushButton[uiRole="warning"]:hover {{ background: {t.warning}; color: {t.window}; border-color: {t.warning}; }}
 #FollowOutputButton:checked {{ background: {t.accent}; color: white; border-color: {t.accent}; }}
 
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
-    background: {t.surface_raised}; border: 1px solid {t.border}; border-radius: 4px;
-    padding: 3px 6px; color: {t.text};
+    background: {t.surface_raised}; border: 1px solid {t.border}; border-radius: 6px;
+    padding: 4px 7px; color: {t.text};
 }}
+QLineEdit:hover, QPlainTextEdit:hover, QTextEdit:hover, QComboBox:hover,
+QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: #3d4963; }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:on,
 QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {t.accent}; }}
 QLineEdit[semanticColor="raw"]:focus, QPlainTextEdit[semanticColor="raw"]:focus,
@@ -194,7 +205,8 @@ QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled, QComboBox:disab
 QSpinBox:disabled, QDoubleSpinBox:disabled {{ color: {t.text_disabled}; background: {t.window}; border-color: {t.border_muted}; }}
 
 QCheckBox {{ spacing: 8px; color: {t.text}; }}
-QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {t.border}; border-radius: 3px; background: {t.surface_raised}; }}
+QCheckBox::indicator {{ width: 15px; height: 15px; border: 1px solid {t.border}; border-radius: 4px; background: {t.surface_raised}; }}
+QCheckBox::indicator:hover {{ border-color: {t.accent}; }}
 QCheckBox::indicator:checked {{ background: {t.accent_alt}; border-color: {t.accent_alt}; }}
 QCheckBox[semanticColor="raw"]::indicator:checked {{ background: {t.accent_alt}; border-color: {t.accent_alt}; }}
 QCheckBox[semanticColor="transformed"]::indicator:checked {{ background: {t.warning}; border-color: {t.warning}; }}
@@ -218,8 +230,8 @@ QSlider[semanticColor="transformed"]::sub-page:horizontal:disabled {{ background
 QLabel:disabled {{ color: {t.text_disabled}; }}
 #TitleLabel {{ color: {t.accent}; font-size: 20pt; font-weight: bold; padding: 12px; border-bottom: 1px solid {t.border}; }}
 QTabWidget::pane {{ border: 1px solid {t.border}; border-top: none; }}
-QTabBar::tab {{ background: {t.window}; border: 1px solid {t.border}; border-bottom: none; border-radius: 4px 4px 0 0; padding: 5px 10px; color: {t.text_muted}; font-weight: bold; min-height: 24px; }}
-QTabBar::tab:selected {{ background: {t.surface_raised}; color: {t.accent}; border-bottom: 2px solid {t.accent}; }}
+QTabBar::tab {{ background: {t.window}; border: 1px solid {t.border}; border-bottom: none; border-radius: 6px 6px 0 0; padding: 6px 12px; color: {t.text_muted}; font-weight: bold; min-height: 24px; }}
+QTabBar::tab:selected {{ background: {t.surface_raised}; color: {t.accent_hover}; border-bottom: 2px solid {t.accent}; }}
 QTabBar::tab:!selected:hover {{ background: {t.surface_hover}; color: {t.text}; }}
 QScrollArea {{ border: none; }}
 QScrollArea[uiRole="settingsSidebar"] {{ background: transparent; }}
@@ -228,20 +240,20 @@ QScrollArea[uiRole="mainContent"] {{ background: transparent; }}
 QScrollArea[uiRole="mainContent"] QWidget#qt_scrollarea_viewport {{ background: transparent; }}
 QScrollArea[uiRole="tabOverflow"] {{ background: transparent; }}
 QScrollArea[uiRole="tabOverflow"] QWidget#qt_scrollarea_viewport {{ background: transparent; }}
-QHeaderView::section {{ background: {t.surface_raised}; color: {t.text}; border: 1px solid {t.border}; padding: 4px; }}
-QTableWidget, QListWidget {{ gridline-color: {t.border}; background: {t.surface_raised}; alternate-background-color: {t.surface}; }}
+QHeaderView::section {{ background: {t.surface_raised}; color: {t.text}; border: 1px solid {t.border}; padding: 5px; font-weight: bold; }}
+QTableWidget, QListWidget {{ gridline-color: {t.border}; background: {t.surface_raised}; alternate-background-color: {t.surface}; border-radius: 6px; }}
 QTableWidget::item:selected, QListWidget::item:selected {{ background: {t.accent}; color: white; }}
 QTableWidget[semanticColor="raw"]::item:selected,
 QListWidget[semanticColor="raw"]::item:selected {{ background: {t.accent_alt}; color: {t.window}; }}
 QTableWidget[semanticColor="transformed"]::item:selected,
 QListWidget[semanticColor="transformed"]::item:selected {{ background: {t.warning}; color: {t.window}; }}
-QScrollBar:vertical {{ background: {t.window}; width: 8px; border-radius: 4px; }}
-QScrollBar::handle:vertical {{ background: {t.border}; border-radius: 4px; min-height: 20px; }}
+QScrollBar:vertical {{ background: {t.window}; width: 9px; border-radius: 4px; }}
+QScrollBar::handle:vertical {{ background: {t.border}; border-radius: 4px; min-height: 24px; }}
 QScrollBar::handle:vertical:hover {{ background: {t.accent}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QSplitter::handle {{ background: {t.border}; }}
-QToolTip {{ background: {t.surface_raised}; color: {t.text}; border: 1px solid {t.border}; padding: 4px; }}
-QMenu {{ background: {t.nested_group}; border: 1px solid {t.border}; border-radius: 6px; padding: 3px; }}
+QToolTip {{ background: {t.surface_raised}; color: {t.text}; border: 1px solid {t.accent}; border-radius: 4px; padding: 5px 7px; }}
+QMenu {{ background: {t.nested_group}; border: 1px solid {t.border}; border-radius: 6px; padding: 4px; }}
 QGroupBox[uiRole="datasetNavigator"] {{ background: {t.nested_group}; }}
 QGroupBox[uiRole="datasetNavigator"]::title {{ background: transparent; }}
 QListWidget[uiRole="quickFocus"],

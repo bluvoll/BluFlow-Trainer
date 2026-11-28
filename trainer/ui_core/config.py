@@ -41,11 +41,18 @@ def normalize(flat, previous=None):
                 value[weight_key] = MIX_DEFAULTS[mode].copy()
         if value.get("flow.cabal_shift") and not previous.get("flow.cabal_shift"):
             value["flow.flux_shift"] = False
+            value["flow.res_shift"] = False
             if value.get("flow.shift") is None:
                 value["flow.shift"] = 6.0
         elif value.get("flow.flux_shift") and not previous.get("flow.flux_shift"):
             value["flow.cabal_shift"] = False
+            value["flow.res_shift"] = False
             value["flow.shift"] = None
+        elif value.get("flow.res_shift") and not previous.get("flow.res_shift"):
+            value["flow.flux_shift"] = False
+            value["flow.cabal_shift"] = False
+            if value.get("flow.timestep_sample_method") != "moss" and value.get("flow.shift") is None:
+                value["flow.shift"] = 3.0 if value.get("train.model_family") == "moss_image" else 6.0
         if (
             value.get("flow.timestep_sample_method") == "uniform"
             and previous.get("flow.timestep_sample_method") != "uniform"
@@ -55,7 +62,8 @@ def normalize(flat, previous=None):
             "resolution_schedule.enabled"
         ):
             tiers = value.get("dataset.resolutions") or [512, 768, 1024]
-            if not value.get("resolution_schedule.stages"):
+            stages = value.get("resolution_schedule.stages") or []
+            if not stages or [s.get("resolution") for s in stages] != list(tiers):
                 shares = (
                     [0.2, 0.2, 0.6]
                     if len(tiers) == 3
@@ -73,6 +81,7 @@ def normalize(flat, previous=None):
                     t: value.get("train.batch_size", 1) for t in tiers
                 }
             value["train.pack_resolutions"] = True
+            value["train.pack_mode"] = "samples"
             if value.get("train.attention_backend") == "sdpa":
                 value["train.attention_backend"] = (
                     "flash_attn_2" if sys.platform == "win32" else "torch_varlen"
@@ -135,8 +144,39 @@ def normalize(flat, previous=None):
                 "flow.cabal_shift": False,
             }
         )
+    elif value.get("flow.flux_shift") and not value.get("flow.cabal_shift") and not value.get("flow.res_shift"):
+        value["flow.shift"] = None
+    if not value.get("train.pack_resolutions") or value.get("resolution_schedule.enabled"):
+        value["train.pack_mode"] = "samples"
+        value["train.pack_token_budget"] = 8576
+    elif value.get("train.pack_mode", "samples") != "tokens":
+        value["train.pack_token_budget"] = 8576
+    if not value.get("train.resume_from"):
+        value["train.resume_mode"] = "exact"
+    if not value.get("train.cache_text_embeddings"):
+        value["train.caption_variations"] = 0
+        value["train.caption_cache_path"] = None
+    else:
+        value["train.compile_text_encoder"] = False
+        value["train.text_encoder_embedding_only"] = False
+    if value.get("adapter.kind", "none") != "none":
+        value["component_lr.adaln"] = None
+    if value.get("adapter.kind") != "lora":
+        value["adapter.loraplus_lr_ratio"] = 1.0
+    if not (value.get("train.activation_offload") and value.get("train.activation_offload_pin_memory")):
+        value["train.activation_offload_prefetch"] = False
+    if not (
+        value.get("quant.backend", "sdnq") == "sdnq"
+        and value.get("quant.mode") in ("frozen", "training")
+        and value.get("quant.use_quantized_matmul") is True
+    ):
+        value["quant.use_hadamard"] = False
+    if value.get("train.model_family") != "moss_image":
+        value["train.moss_checkpoint_inside_compile"] = False
+        value["train.moss_qkv_format"] = "auto"
     if value.get("dataset.subsets"):
         value["dataset.path"] = None
+        value["dataset.mask_path"] = None
     for key in ("train.batch_size",):
         if isinstance(value.get(key), dict):
             value[key] = {int(k): v for k, v in value[key].items()}
@@ -185,7 +225,7 @@ def evaluate(flat, processes=1, show_experimental=False, latent_h=64, latent_w=6
         except (ValueError, TypeError):
             enabled[key] = True
     if flat.get("dataset.subsets"):
-        enabled["dataset.path"] = enabled["dataset.num_repeats"] = enabled['dataset.target_images'] = False
+        enabled["dataset.path"] = enabled["dataset.num_repeats"] = enabled["dataset.target_images"] = enabled["dataset.mask_path"] = False
     try:
         ok, error = bridge.validate(flat)
         notes = bridge.advisories(flat, processes)

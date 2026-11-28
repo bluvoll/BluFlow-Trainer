@@ -202,6 +202,7 @@ def build_adapter_param_groups(
     default_lr: float,
     weight_decay: float = 0.0,
     block_lr: BlockLRConfig | None = None,
+    loraplus_lr_ratio: float = 1.0,
 ) -> ParamGroupReport:
     """The adapter counterpart of `build_param_groups`: split adapter tensors by the component
     of the base module they wrap.
@@ -212,7 +213,7 @@ def build_adapter_param_groups(
     rather than carrying dead zero tensors into the export.
     """
     multipliers = (block_lr or BlockLRConfig()).expanded()
-    buckets: dict[tuple[str, float], list[torch.nn.Parameter]] = {}
+    buckets: dict[tuple[str, float, float], list[torch.nn.Parameter]] = {}
     counts: dict[str, int] = {}
     frozen: dict[str, int] = {}
 
@@ -224,23 +225,24 @@ def build_adapter_param_groups(
         # PEFT and LyCORIS adapters retain their base module's qualified name.
         # Text-refiner blocks live under text_embedder.blocks and are unaffected.
         multiplier = multipliers[int(match[1])] if match and block_lr and block_lr.enabled else 1.0
-        if lrs.resolve(component, default_lr) * multiplier == 0.0:
+        b_mul = float(loraplus_lr_ratio) if (loraplus_lr_ratio != 1.0 and ".lora_B." in name) else 1.0
+        if lrs.resolve(component, default_lr) * multiplier * b_mul == 0.0:
             param.requires_grad_(False)
             frozen[component] = frozen.get(component, 0) + param.numel()
             continue
-        buckets.setdefault((component, multiplier), []).append(param)
+        buckets.setdefault((component, multiplier, b_mul), []).append(param)
         counts[component] = counts.get(component, 0) + param.numel()
 
     groups = [
         {
             "params": params,
-            "lr": lrs.resolve(component, default_lr) * multiplier,
+            "lr": lrs.resolve(component, default_lr) * multiplier * b_mul,
             "weight_decay": 0.0 if component == "rti" else weight_decay,
             "component": component,
             "block_lr_mul": multiplier,
         }
-        for (component, multiplier), params in sorted(
-            buckets.items(), key=lambda item: (COMPONENTS.index(item[0][0]), item[0][1]))
+        for (component, multiplier, b_mul), params in sorted(
+            buckets.items(), key=lambda item: (COMPONENTS.index(item[0][0]), item[0][1], item[0][2]))
         if params
     ]
     if not groups:
@@ -302,6 +304,7 @@ class AdapterConfig:
     dtype: str = "float32"
     alpha: float = 32.0
     dropout: float = 0.0
+    loraplus_lr_ratio: float = 1.0  # PEFT LoRA+ multiplier for lora_B LR (1.0 = standard LoRA)
     components: list[str] = field(
         default_factory=lambda: ["image_attn", "text_attn", "mlp"]
     )
@@ -347,6 +350,15 @@ class AdapterConfig:
             raise ValueError(f"adapter.init must be one of {MODES}, got {self.init!r}")
         if self.init != "random" and self.kind != "lora":
             raise ValueError(f"adapter.init={self.init!r} applies to kind='lora' only")
+        if (
+            isinstance(self.loraplus_lr_ratio, bool)
+            or not isinstance(self.loraplus_lr_ratio, (int, float))
+            or not math.isfinite(self.loraplus_lr_ratio)
+            or self.loraplus_lr_ratio <= 0.0
+        ):
+            raise ValueError("adapter.loraplus_lr_ratio must be finite and > 0")
+        if self.loraplus_lr_ratio != 1.0 and self.kind != "lora":
+            raise ValueError("adapter.loraplus_lr_ratio is supported for PEFT LoRA (adapter.kind='lora') only")
 
     def _validate_lora_targets(self):
         if self.kind in ("lora", "lycoris_lora") and "adaln" in self.components:

@@ -27,6 +27,7 @@ import toml
 from ..training.resolution_schedule import ResolutionSchedule
 from ..training.block_lr import BlockLRConfig
 from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults
+from ..training.slider import SliderConfig
 
 from ..data.caption import CAPTION_VARIANTS, MIX_DEFAULTS, CaptionConfig, compatible_mix
 from ..data.texture import TextureConfig
@@ -69,6 +70,7 @@ SECTIONS: dict[str, type] = {
     "perceptual": PerceptualConfig,
     "adversarial": EyeAdversarialConfig,
     "paired_texture": PairedTextureConfig,
+    "slider": SliderConfig,
 }
 
 # Fields that exist on a dataclass but are not config keys in their own section -- they are
@@ -118,7 +120,7 @@ def schema() -> dict[str, dc.Field]:
 
 
 # Advanced TOML settings intentionally omitted from the Mage-Flow GUI.
-CLI_ONLY_KEYS = {"adapter.components", "adapter.init", "adapter.init_cache"} | {
+CLI_ONLY_KEYS = {"adapter.components", "adapter.init", "adapter.init_cache", "dataset.caption.protected_tags_file"} | {
     key for key in schema()
     if key.startswith(("preserve.", "component_lr.")) and key != "component_lr.adaln"
 }
@@ -172,9 +174,16 @@ def flatten(nested: dict) -> dict:
                 value = "locon"
             if dotted == "train.compile" and value is False:
                 value = None
+            if dotted == "train.save_every_epochs" and value == 0:
+                value = None
             flat[dotted] = value
+    caption_raw = nested.get("dataset", {}).get("caption", {})
+    if isinstance(caption_raw, dict) and caption_raw.get("protected_tags_file") is not None:
+        flat["dataset.caption.protected_tags_file"] = caption_raw["protected_tags_file"]
     for key in ARRAY_KEYS:
         value = nested.get(key)
+        if isinstance(value, dict) and isinstance(value.get("phases"), list):
+            value = value["phases"]
         if isinstance(value, list):
             flat[key] = [dict(entry) for entry in value if isinstance(entry, dict)]
     mode, weights = flat.get(_MODE), flat.get(_WEIGHTS)
@@ -244,11 +253,28 @@ def prune_defaults(flat: dict) -> dict:
             out[key] = value
             continue
         d = base[key]
-        # tuple/list mismatch: `betas` defaults to a tuple and round-trips through TOML as a list.
+        # tuple/set/list mismatch: `betas` / `protected_tags` round-trip through TOML as lists.
         if isinstance(d, tuple) and isinstance(value, list):
             d = list(d)
+        elif isinstance(d, set) and isinstance(value, list):
+            d = sorted(d)
+            value_cmp = sorted(value)
+            if value_cmp != d:
+                out[key] = value
+            continue
         if value != d:
             out[key] = value
+    if (
+        "flow.shift" in flat
+        and flat["flow.shift"] is None
+        and not flat.get("flow.flux_shift")
+        and not flat.get("flow.cabal_shift")
+        and not flat.get("flow.res_shift")
+        and flat.get("flow.timestep_sample_method") != "moss"
+    ):
+        out["flow.shift"] = 1.0
+    if "train.save_every_epochs" in flat and flat["train.save_every_epochs"] is None:
+        out["train.save_every_epochs"] = 0
     # `load_config` rejects a file that sets both. The GUI writes the file, so the right behaviour
     # is to emit the one that is in effect rather than to hand the user an error about a key they
     # cannot see. A multi-tier ladder wins; `resolution` is what "one tier" means.
@@ -260,9 +286,11 @@ def prune_defaults(flat: dict) -> dict:
     # GUI keeps a value in the path box even after subsets are added. Emit the one in effect.
     if out.get("dataset.subsets"):
         out.pop("dataset.path", None)
+        out.pop("dataset.mask_path", None)  # subsets carry their own mask folders
         out.pop('dataset.num_repeats', None)
         out.pop('dataset.target_images', None)
         out['dataset.subsets'] = [{k: v for k, v in s.items() if v is not None
+                                  and not (k == 'mask_path' and not v)
                                   and not (k == 'num_repeats' and s.get('target_images') is not None)}
                                  for s in out['dataset.subsets']]
     else:
@@ -275,6 +303,56 @@ def prune_defaults(flat: dict) -> dict:
             out.pop('train.max_steps', None)
             if flat.get('resolution_schedule.unit') == 'stage_epochs':
                 out.pop('train.epochs', None)
+    else:
+        for key in (
+            'resolution_schedule.stages',
+            'resolution_schedule.unit',
+            'resolution_schedule.save_stage_end',
+            'resolution_schedule.restart_lr_each_stage',
+        ):
+            out.pop(key, None)
+    if not flat.get("train.pack_resolutions") or flat.get("resolution_schedule.enabled"):
+        out.pop("train.pack_mode", None)
+        out.pop("train.pack_token_budget", None)
+    elif flat.get("train.pack_mode", "samples") != "tokens":
+        out.pop("train.pack_token_budget", None)
+    if not flat.get("train.resume_from"):
+        out.pop("train.resume_mode", None)
+    if not flat.get("train.cache_text_embeddings"):
+        out.pop("train.caption_variations", None)
+        out.pop("train.caption_cache_path", None)
+    else:
+        out.pop("train.compile_text_encoder", None)
+        out.pop("train.text_encoder_embedding_only", None)
+    if flat.get("adapter.kind", "none") != "none":
+        out.pop("component_lr.adaln", None)
+    if flat.get("adapter.kind") != "lora":
+        out.pop("adapter.loraplus_lr_ratio", None)
+    if not (flat.get("train.activation_offload") and flat.get("train.activation_offload_pin_memory")):
+        out.pop("train.activation_offload_prefetch", None)
+    if not (
+        flat.get("quant.backend", "sdnq") == "sdnq"
+        and flat.get("quant.mode") in ("frozen", "training")
+        and flat.get("quant.use_quantized_matmul") is True
+    ):
+        out.pop("quant.use_hadamard", None)
+    if not (
+        flat.get("train.model_family") in ("auto", "moss_image")
+        and (
+            flat.get("adapter.kind") in ("none", "lora")
+            or (
+                flat.get("adapter.kind") == "lycoris_lora"
+                and flat.get("adapter.lycoris_algo") == "locon"
+            )
+        )
+    ):
+        out.pop("train.moss_qkv_format", None)
+    if not (
+        flat.get("train.model_family") in ("auto", "moss_image")
+        and bool(flat.get("train.compile"))
+        and bool(flat.get("train.gradient_checkpointing"))
+    ):
+        out.pop("train.moss_checkpoint_inside_compile", None)
     if flat.get('dataset.target_images') is not None:
         out.pop('dataset.num_repeats', None)
     return out
@@ -351,6 +429,8 @@ def summarize(flat: dict) -> str:
         return "config invalid"
     kind = flat.get("adapter.kind", "none")
     mode = "full finetune" if kind in (None, "none", "") else f"LoRA/{kind}"
+    if kind == "lora" and float(flat.get("adapter.loraplus_lr_ratio") or 1.0) != 1.0:
+        mode += f" (LoRA+ x{float(flat['adapter.loraplus_lr_ratio']):g})"
     tiers = flat.get("dataset.resolutions") or [flat.get("dataset.resolution", 1024)]
     quant = flat.get("quant.mode", "none")
     bits = [mode, f"{'/'.join(str(t) for t in tiers)}px"]
@@ -360,6 +440,8 @@ def summarize(flat: dict) -> str:
                     else f"{flat.get('train.epochs')} epochs" if flat.get('resolution_schedule.unit') == 'epochs'
                     else f"{flat.get('train.max_steps')} successful updates")
         bits.append(f"{duration} / staged resolutions")
+    elif flat.get("train.pack_resolutions") and flat.get("train.pack_mode") == "tokens":
+        bits.append(f"packed tokens<={flat.get('train.pack_token_budget', 8576)}")
     # Whether a run crops is decided by the curriculum, which lives in a table on another tab --
     # so without this the status bar reads identically for a plain LoRA and a texture run.
     phases = flat.get("curriculum") or []
@@ -504,6 +586,27 @@ def advisories(flat: dict, num_processes: int = 1) -> list[tuple[str, str]]:
                         "boundary is a maximal Laplacian edge, so detail weighting concentrates on "
                         "exactly the artifact you do not want learned. Padding fires on 56% of "
                         "draws in this configuration.")))
+
+    if not flat.get("resolution_schedule.enabled") and flat.get("resolution_schedule.stages"):
+        out.append(("note",
+                    "resolution_schedule.stages is inactive while staged resolution training is off "
+                    "and will be omitted when saving."))
+
+    if (
+        flat.get("train.pack_resolutions")
+        and flat.get("train.pack_mode") == "tokens"
+        and not flat.get("resolution_schedule.enabled")
+    ):
+        tiers = flat.get("dataset.resolutions") or [flat.get("dataset.resolution", 1024)]
+        valid_tiers = [t for t in tiers if isinstance(t, int) and t > 0]
+        budget = flat.get("train.pack_token_budget", 8576)
+        if valid_tiers and isinstance(budget, int):
+            max_img_tokens = max(valid_tiers) ** 2 // 256
+            if budget < max_img_tokens:
+                out.append(("warn",
+                            f"pack_token_budget ({budget}) is smaller than the {max(valid_tiers)}px "
+                            f"tier's image token count ({max_img_tokens}). Images in that tier will run "
+                            f"as un-packed singletons."))
 
     if flat.get("flow.use_ot"):
         bs = flat.get("train.batch_size", 1)

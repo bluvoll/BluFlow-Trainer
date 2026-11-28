@@ -8,11 +8,13 @@ from trainer.training.config import load_config
 from test_gui_dataset_experiments import gui
 
 
-@pytest.mark.parametrize('kind', ['lora', 'none', 'lokr', 'lycoris_lokr'])
+@pytest.mark.parametrize('kind', ['lora', 'none', 'lokr', 'lycoris_lokr', 'lycoris_dora'])
 def test_experimental_block_table_roundtrip(gui, tmp_path, kind):
     flat = bridge.defaults() | {'dataset.path':'/images', 'train.model_family':'moss_image', 'adapter.kind':kind}
     if kind == 'lycoris_lokr':
         flat.update({'adapter.kind': 'lycoris_lora', 'adapter.lycoris_algo': 'lokr'})
+    elif kind == 'lycoris_dora':
+        flat.update({'adapter.kind': 'lycoris_lora', 'adapter.lycoris_algo': 'dora'})
     gui._apply(flat)
     editor = gui.editors['block_lr.ranges']
     assert gui.editors['block_lr.enabled'].widget.isEnabled()
@@ -52,8 +54,7 @@ def test_overlaps_do_not_silently_change_and_unsupported_can_disable(gui):
     editor._remove()
     editor._add()
     assert editor.get()[-1] == dict(start=25,end=25,lr_mul=1.)
-    gui.editors['adapter.kind'].set('lycoris_lora')
-    gui.editors['adapter.lycoris_algo'].set('dora')
+    gui.editors['train.model_family'].set('mage_flow')
     gui._on_edit()
     assert gui.editors['block_lr.enabled'].widget.isEnabled()
     ok, error = bridge.validate(gui.collect())

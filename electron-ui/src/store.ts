@@ -129,10 +129,18 @@ export function flush(): Promise<void> {
     while (Object.keys(pending).length) {
       const batch = { ...pending },
         patch = Object.fromEntries(Object.entries(batch).map(([key, item]) => [key, item.value]));
-      const result = await window.bluflow.request<State>('config.edit', { patch });
-      for (const [key, item] of Object.entries(batch))
-        if (pending[key]?.revision === item.revision) delete pending[key];
-      accept(result);
+      const clearBatch = () => {
+        for (const [key, item] of Object.entries(batch))
+          if (pending[key]?.revision === item.revision) delete pending[key];
+      };
+      try {
+        const result = await window.bluflow.request<State>('config.edit', { patch });
+        clearBatch();
+        accept(result);
+      } catch (err) {
+        clearBatch();
+        throw err;
+      }
     }
   })().finally(() => {
     flight = null;

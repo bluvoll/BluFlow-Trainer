@@ -417,7 +417,7 @@ def test_stage_lr_restarts_match_independent_curves(kind, world):
     staged = StageLRScheduler(opt, cfg, budgets, world)
     for stage, (updates, warmup) in enumerate(zip(budgets, [1, 5, 0])):
         reference = optimizer()
-        schedule = build_scheduler(reference, replace(cfg, warmup_steps=warmup * world), updates * world)
+        schedule = build_scheduler(reference, replace(cfg, warmup_steps=warmup), updates, ticks_per_update=world)
         for _ in range(updates):
             staged.begin_stage(stage)
             assert [g['lr'] for g in opt.param_groups] == schedule.get_last_lr()

@@ -56,7 +56,8 @@ def eligible_tiles(candidates, a, b, sa, sb):
     args = dict(a_ptr=a, b_ptr=b, c_ptr=torch.empty((), device=a.device, dtype=torch.bfloat16),
                 scale_a_ptr=sa, scale_b_ptr=sb, bias_ptr=None, bias_ndim=0,
                 M=a.shape[0], N=b.shape[1], K=a.shape[1],
-                scale_a_is_tensorwise=sa.numel() == 1, scale_b_is_tensorwise=sb.numel() == 1)
+                scale_a_is_tensorwise=sa.numel() == 1, scale_b_is_tensorwise=sb.numel() == 1,
+                use_fp16_accum=0, use_tensor_descriptors=0)
     pruned = kernel.prune_configs(configs, args)
     tiles = [dict(c.kwargs, num_warps=c.num_warps, num_stages=c.num_stages) for c in pruned]
     return [tile for tile in tiles if tile in candidates]
@@ -158,6 +159,7 @@ def activate(device, profile):
     import torch
     device = torch.device(device)
     _ACTIVE[device.index if device.index is not None else torch.cuda.current_device()] = profile
+    _TILE_CACHE.clear()
 
 
 def has_profile(device):
@@ -168,20 +170,29 @@ def has_profile(device):
 
 def clear_active():
     _ACTIVE.clear()
+    _TILE_CACHE.clear()
+
+
+_TILE_CACHE: dict[tuple[int, int, int, int, bool], object] = {}
 
 
 def select_tile(device, m, n, k, contiguous):
     import torch
-    if device.type != 'cuda' or has_kernel_overrides():
+    if device.type != 'cuda':
         return None
     index = device.index if device.index is not None else torch.cuda.current_device()
+    key = (index, m, n, k, contiguous)
+    if key in _TILE_CACHE and not has_kernel_overrides():
+        return _TILE_CACHE[key]
+    if has_kernel_overrides():
+        return None
     profile = _ACTIVE.get(index)
     if not profile:
         return None
     entries = [e for e in profile['entries'] if (e['n'], e['k'], e['contiguous']) == (n, k, contiguous)]
-    if not entries:
-        return None
-    return min(entries, key=lambda e: abs(math.log2(max(m, 1) / e['m'])))['tile']
+    tile = min(entries, key=lambda e: abs(math.log2(max(m, 1) / e['m'])))['tile'] if entries else None
+    _TILE_CACHE[key] = tile
+    return tile
 
 
 def launch_scaled_mm(a, b, sa, sb, dtype, tile):

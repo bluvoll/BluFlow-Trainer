@@ -11,6 +11,13 @@ DECOMPOSED = {"dora"}
 
 
 def dense_weight(module):
+    if getattr(module, "_trainer_sdnq_matmul", False):
+        w = (module.weight.float() * module._sdnq_scale).to(torch.bfloat16)
+        rot = module._sdnq_rotation
+        if rot is not None:
+            g = rot.shape[0]
+            w = (w.reshape(-1, g) @ rot).reshape(w.shape)
+        return w.detach()
     if hasattr(module, "sdnq_dequantizer"):
         return module.sdnq_dequantizer(
             module.weight,
@@ -18,7 +25,7 @@ def dense_weight(module):
             zero_point=module.zero_point,
             svd_up=module.svd_up,
             svd_down=module.svd_down,
-            skip_quantized_matmul=True,
+            skip_quantized_matmul=bool(module.sdnq_dequantizer.use_quantized_matmul),
         ).detach()
     return module.weight.detach()
 

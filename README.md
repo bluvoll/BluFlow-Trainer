@@ -1074,7 +1074,9 @@ are also separate from MOSS training.
 
 - [MOSS-Image model loading, training, validation, and export](docs/moss-image-experimental.md)
 - [Caption variation cache and invalidation](docs/caption-variation-cache.md)
+- [Masked training (painted loss masks)](docs/masked-training.md)
 - [HF and paired texture losses](docs/detail-losses.md)
+- [Concept sliders](docs/concept-sliders.md)
 - [SDNQ update-rounding diagnosis](docs/sdnq-integer-update-rounding.md)
 - [General configuration and legacy Mage workflows](docs/training-guide.md)
 - [FLUX.3 integration and limitations](docs/flux3-experimental.md)

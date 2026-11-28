@@ -100,7 +100,7 @@ class OptTextEditor(TextEditor):
 
 
 class PathEditor(_Blockable):
-    def __init__(self, kind="folder"):
+    def __init__(self, kind="folder", optional=True):
         container = QtWidgets.QWidget()
         row = QtWidgets.QHBoxLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
@@ -112,6 +112,7 @@ class PathEditor(_Blockable):
         row.addWidget(browse)
         super().__init__(container)
         self.kind = kind
+        self.optional = optional
         self.line.textChanged.connect(self._emit)
 
     def _browse(self):
@@ -124,7 +125,8 @@ class PathEditor(_Blockable):
             self.line.setText(path)
 
     def get(self):
-        return self.line.text().strip()
+        text = self.line.text().strip()
+        return (text or None) if self.optional else text
 
     def _set(self, value):
         self.line.setText("" if value is None else str(value))
@@ -164,7 +166,7 @@ class OptIntEditor(_Blockable):
         try:
             return int(float(text))
         except ValueError:
-            return None
+            return text
 
     def _set(self, value):
         self.widget.setText("" if value is None else str(int(value)))
@@ -254,7 +256,7 @@ class SciEditor(_Blockable):
         try:
             return float(text)
         except ValueError:
-            return None
+            return text
 
     def _set(self, value):
         if value is None:
@@ -407,7 +409,7 @@ class NumListEditor(_Blockable):
             try:
                 out.append(self.cast(float(part)))
             except ValueError:
-                return None
+                return text
         if not out:
             return None
         return tuple(out) if self.as_tuple else out
@@ -497,22 +499,25 @@ class BucketMapEditor(_Blockable):
     def get(self):
         text = self.widget.text().strip()
         if not text:
-            return 1
+            return text
         if "=" not in text:
             try:
                 return int(float(text))
             except ValueError:
-                return 1
+                return text
         out = {}
         for part in text.split(","):
-            if "=" not in part:
+            part = part.strip()
+            if not part:
                 continue
+            if "=" not in part:
+                return text
             k, _, v = part.partition("=")
             try:
                 out[int(float(k.strip()))] = int(float(v.strip()))
             except ValueError:
-                continue
-        return out or 1
+                return text
+        return out or text
 
     def _set(self, value):
         if isinstance(value, dict):
@@ -600,18 +605,21 @@ class CanvasListEditor(_Blockable):
         w.textChanged.connect(self._emit)
 
     def get(self):
+        raw = self.widget.toPlainText().strip()
+        if not raw:
+            return []
         out = []
-        for part in self.widget.toPlainText().replace("\n", ",").split(","):
+        for part in raw.replace("\n", ",").split(","):
             part = part.strip().lower()
             if not part:
                 continue
             if "x" not in part:
-                continue
+                return raw
             a, _, b = part.partition("x")
             try:
                 out.append((int(a), int(b)))
             except ValueError:
-                continue
+                return raw
         return out
 
     def _set(self, value):
@@ -740,7 +748,7 @@ class CurriculumEditor(_Blockable):
             prev = self._read_row(i - 1)
             at = min(0.999, prev["at"] + 0.1)
             self._make_row(at, prev["t_range"][0], prev["t_range"][1],
-                           prev["mode"], prev["lr_mul"], i)
+                           prev["mode"], prev.get("lr_mul", 1.0), i)
         self._emit()
 
     def _remove_row(self):
@@ -838,9 +846,11 @@ class SubsetEditor(_Blockable):
     The two are mutually exclusive in the loader, so `prune_defaults` drops `dataset.path` as soon
     as a row exists -- the GUI writes the file, so it resolves the conflict rather than handing
     back an error about a key the user cannot see.
+    The fifth column is the subset's painted loss-mask folder (`mask_path`); empty leaves that
+    folder unmasked. It is last so the first four keep their indexes.
     """
 
-    _HEADERS = ("Folder", "Repeats", "Texture crops", "Image target")
+    _HEADERS = ("Folder", "Repeats", "Texture crops", "Image target", "Masks")
 
     def __init__(self):
         w = QtWidgets.QWidget()
@@ -866,6 +876,7 @@ class SubsetEditor(_Blockable):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         head = self.table.horizontalHeader()
         head.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        head.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
         for i in (1, 2, 3):
             head.setSectionResizeMode(i, QtWidgets.QHeaderView.ResizeMode.Fixed)
         head.resizeSection(1, 110)
@@ -892,7 +903,8 @@ class SubsetEditor(_Blockable):
         self.clear_btn.clicked.connect(self._clear)
         self.table.itemSelectionChanged.connect(self._update_remove_button)
 
-    def _make_row(self, path, num_repeats, texture, index, target_images=None):
+    @staticmethod
+    def _folder_cell(path):
         # A plain QLineEdit + button rather than a nested PathEditor. PathEditor is a QObject
         # wrapper around its widget; putting only the widget in a table cell leaves the wrapper
         # unreferenced, Python collects it, and Qt then owns a half-destroyed object -- which
@@ -915,6 +927,16 @@ class SubsetEditor(_Blockable):
             if chosen:
                 line.setText(chosen)
         browse.clicked.connect(_pick)
+        return holder_path, line, browse
+
+    def _make_row(self, path, num_repeats, texture, index, target_images=None, mask_path=""):
+        holder_path, line, browse = self._folder_cell(path)
+        holder_mask, mask_line, _ = self._folder_cell(mask_path)
+        mask_line.setPlaceholderText("unmasked")
+        mask_line.setToolTip(
+            "Optional folder of grayscale loss masks for this folder's images, matched by filename "
+            "stem. White = learn, black = weight dataset.mask_outside_weight. Empty = unmasked."
+        )
 
         reps = NoScrollDoubleSpinBox()
         reps.setLocale(QtCore.QLocale.c())
@@ -947,15 +969,17 @@ class SubsetEditor(_Blockable):
         # Keep the QObject editor alive for as long as its table cell exists.
         target.widget.editor = target
         self.table.setCellWidget(index, 3, target.widget)
+        self.table.setCellWidget(index, 4, holder_mask)
         reps.setEnabled(target_images is None)
         target.changed.connect(lambda: (reps.setEnabled(target.get() is None), self._emit()))
         self.table.setRowHeight(index, max(40, line.sizeHint().height() + 8,
                                            reps.sizeHint().height() + 8,
                                            browse.sizeHint().height() + 8))
         line.textChanged.connect(self._emit)
+        mask_line.textChanged.connect(self._emit)
         reps.valueChanged.connect(self._emit)
         tex.toggled.connect(self._emit)
-        return line, reps, tex
+        return line, reps, tex, mask_line
 
     def _add_row(self):
         i = self.table.rowCount()
@@ -999,6 +1023,9 @@ class SubsetEditor(_Blockable):
             row["num_repeats"] = reps.value()
         if not tex.isChecked():
             row["texture"] = False
+        masks = self.table.cellWidget(i, 4).findChild(QtWidgets.QLineEdit).text().strip()
+        if masks:
+            row["mask_path"] = masks
         return row
 
     def get(self):
@@ -1012,7 +1039,8 @@ class SubsetEditor(_Blockable):
             i = self.table.rowCount()
             self.table.insertRow(i)
             self._make_row(sub.get("path", ""), sub.get("num_repeats", 1),
-                           sub.get("texture", True), i, sub.get('target_images'))
+                           sub.get("texture", True), i, sub.get('target_images'),
+                           sub.get("mask_path") or "")
 
 
 class BlockLRRangesEditor(_Blockable):
@@ -1175,6 +1203,13 @@ class ResolutionStagesEditor(_Blockable):
         if row >= 0:
             self.table.removeRow(row)
             self._emit()
+
+    def set_unit(self, unit: str):
+        explicit = unit == 'stage_epochs'
+        if explicit == self.explicit_epochs:
+            return
+        self.explicit_epochs = explicit
+        self.table.horizontalHeaderItem(1).setText('Epochs' if self.explicit_epochs else 'Share %')
 
     def _set(self, value):
         self.explicit_epochs = any(s.get('epochs') is not None for s in value or [])

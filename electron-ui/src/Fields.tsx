@@ -30,6 +30,7 @@ export const editorKinds = [
   'BlockLRRangesEditor',
   'ResolutionStagesEditor',
 ];
+const cleanPct = (v: number) => Number((v * 100).toPrecision(12));
 const numeric = (text: string, integer = false) =>
   text.trim() === ''
     ? null
@@ -217,14 +218,14 @@ function TableEditor({
   });
   const rows: Flat[] = Array.isArray(value) && value.length ? value : curriculum ? retained : [];
   const enabled = !curriculum || (Array.isArray(value) && value.length > 0);
-  const commit = (next: Flat[]) => {
+  const commit = (next: Flat[], forceEnable = false) => {
     setRetained(next);
     tableDrafts.set(cacheKey, { revision: configRevision, rows: next });
-    onChange(curriculum && !enabled ? [] : next);
+    onChange(curriculum && !enabled && !forceEnable ? [] : next);
   };
   const columns =
     kind === 'SubsetEditor'
-      ? ['Folder', 'Image weighting', 'Texture crops']
+      ? ['Folder', 'Image weighting', 'Texture crops', 'Masks']
       : curriculum
         ? ['Start %', 't min', 't max', 'Mode', 'LR ×']
         : blockRanges
@@ -238,7 +239,7 @@ function TableEditor({
   const add = () => {
     const row =
       kind === 'SubsetEditor'
-        ? { path: '', num_repeats: 1, texture: true }
+        ? { path: '', num_repeats: 1, texture: false }
         : curriculum
           ? {
               at: rows.length ? Math.min(0.99, Number(rows.at(-1)?.at || 0) + 0.1) : 0,
@@ -249,7 +250,7 @@ function TableEditor({
           : blockRanges
             ? { start: firstBlock, end: firstBlock, lr_mul: 1 }
             : { resolution: 1024, ...(explicitEpochs ? { epochs: 1 } : { share: 0.2 }), lr_mul: 1 };
-    commit([...rows, row]);
+    commit([...rows, row], curriculum);
   };
   const cell = (row: Flat, index: number, column: number) => {
     const set = (key: string, v: any) =>
@@ -273,32 +274,44 @@ function TableEditor({
               onChange={(v) => set('target_images', v)}
             />
             {row.target_images == null && (
-              <input
+              <ValueInput
                 aria-label={`Subset ${index + 1} repeats`}
                 type="number"
                 min="0"
                 step="any"
                 value={row.num_repeats ?? 1}
-                onChange={(e) => set('num_repeats', numeric(e.target.value))}
+                parse={(text) => numeric(text) ?? ''}
+                onChange={(v) => set('num_repeats', v)}
               />
             )}
           </div>
         );
+      if (column === 2)
+        return (
+          <input
+            aria-label={`Subset ${index + 1} texture crops`}
+            type="checkbox"
+            checked={Boolean(row.texture)}
+            onChange={(e) => set('texture', e.target.checked)}
+          />
+        );
       return (
-        <input
-          aria-label={`Subset ${index + 1} texture crops`}
-          type="checkbox"
-          checked={row.texture !== false}
-          onChange={(e) => set('texture', e.target.checked)}
+        <PathInput
+          label={`Subset ${index + 1} masks`}
+          value={row.mask_path ?? ''}
+          kind="folder"
+          onChange={(v) => set('mask_path', v || null)}
         />
       );
     }
     if (curriculum) {
+      const rowDisabled = !enabled;
       if (column === 3)
         return (
           <select
             aria-label={`Phase ${index + 1} mode`}
             value={row.mode}
+            disabled={rowDisabled}
             onChange={(e) => set('mode', e.target.value)}
           >
             <option value="fullres">fullres</option>
@@ -307,24 +320,32 @@ function TableEditor({
         );
       const v =
         column === 0
-          ? Number(row.at) * 100
+          ? row.at
           : column === 4
             ? (row.lr_mul ?? 1)
             : (row.t_range?.[column - 1] ?? (column === 1 ? 0 : 1));
       return (
-        <input
+        <ValueInput
           aria-label={`Phase ${index + 1} ${columns[column]}`}
           type="number"
           step="any"
+          disabled={rowDisabled}
           value={v}
-          onChange={(e) => {
-            const n = numeric(e.target.value);
-            if (column === 0) set('at', typeof n === 'number' ? n / 100 : n);
-            else if (column === 4) set('lr_mul', n);
+          format={(val) =>
+            column === 0 && typeof val === 'number' ? String(cleanPct(val)) : String(val)
+          }
+          parse={(text) => {
+            const n = numeric(text);
+            if (n === null) return '';
+            return column === 0 && typeof n === 'number' ? n / 100 : n;
+          }}
+          onChange={(val) => {
+            if (column === 0) set('at', val);
+            else if (column === 4) set('lr_mul', val);
             else
               set(
                 't_range',
-                column === 1 ? [n, row.t_range?.[1] ?? 1] : [row.t_range?.[0] ?? 0, n],
+                column === 1 ? [val, row.t_range?.[1] ?? 1] : [row.t_range?.[0] ?? 0, val],
               );
           }}
         />
@@ -358,16 +379,21 @@ function TableEditor({
     const key = ['resolution', explicitEpochs ? 'epochs' : 'share', 'lr_mul'][column];
     const percent = column === 2 || (column === 1 && !explicitEpochs);
     return (
-      <input
+      <ValueInput
         aria-label={`${curriculum ? 'Phase' : 'Row'} ${index + 1} ${columns[column]}`}
         type="number"
         max={kind === 'ResolutionStagesEditor' && key === 'lr_mul' ? 300 : undefined}
         step={column === 0 ? '1' : 'any'}
-        value={percent ? (row[key] ?? 1) * 100 : (row[key] ?? 1)}
-        onChange={(e) => {
-          const n = numeric(e.target.value);
-          set(key, percent && typeof n === 'number' ? n / 100 : n);
+        value={row[key] ?? 1}
+        format={(val) =>
+          percent && typeof val === 'number' ? String(cleanPct(val)) : String(val)
+        }
+        parse={(text) => {
+          const n = numeric(text, column === 0);
+          if (n === null) return '';
+          return percent && typeof n === 'number' ? n / 100 : n;
         }}
+        onChange={(val) => set(key, val)}
       />
     );
   };
@@ -420,6 +446,7 @@ function TableEditor({
                   <button
                     aria-label={`Remove row ${index + 1}`}
                     title="Remove row"
+                    disabled={curriculum && !enabled}
                     onClick={() => commit(rows.filter((_, i) => i !== index))}
                   >
                     <CloseIcon />
@@ -461,6 +488,7 @@ function TableEditor({
           </button>
         )}
         <button
+          disabled={curriculum && !enabled}
           onClick={() => {
             setRetained([]);
             tableDrafts.delete(cacheKey);
@@ -523,7 +551,7 @@ function Editor({ field, value }: { field: Field; value: any }) {
       </label>
     );
   if (field.kind === 'PathEditor')
-    return <PathInput label={label} value={value} kind={a[0]} onChange={(v) => set(v || null)} />;
+    return <PathInput label={label} value={value} kind={a[0]} onChange={(v) => set(v || (k.optional === false ? '' : null))} />;
   if (field.kind === 'ChoiceEditor' || field.kind === 'OptimizerEditor') {
     const labels = a[0] || [],
       values: any[] = k.values ?? a[1] ?? labels;
@@ -591,7 +619,7 @@ function Editor({ field, value }: { field: Field; value: any }) {
               max="1000"
               step="any"
               value={value?.[key] ?? 0}
-              onChange={(e) => set({ ...value, [key]: numeric(e.target.value) })}
+              onChange={(e) => set({ ...value, [key]: numeric(e.target.value) ?? 0 })}
             />
           </label>
         ))}
@@ -700,6 +728,7 @@ function Editor({ field, value }: { field: Field; value: any }) {
   }
   if (['FloatEditor', 'IntEditor', 'OptIntEditor', 'SciEditor'].includes(field.kind)) {
     const integer = field.kind === 'IntEditor' || field.kind === 'OptIntEditor';
+    const optional = field.kind === 'OptIntEditor' || Boolean(k.optional);
     return (
       <ValueInput
         aria-label={label}
@@ -718,7 +747,10 @@ function Editor({ field, value }: { field: Field; value: any }) {
                 ? 'Unset'
                 : ''
         }
-        parse={(s) => numeric(s, integer)}
+        parse={(s) => {
+          const v = numeric(s, integer);
+          return v === null && !optional ? '' : v;
+        }}
         onChange={set}
       />
     );

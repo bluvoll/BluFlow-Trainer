@@ -177,17 +177,27 @@ class Trainer:
             print(f"note: ignoring mixed_precision={env_mp!r} from the accelerate environment; "
                   f"this trainer sets precision through train.dtype (={cfg.train.dtype}) and "
                   f"autocast breaks SDNQ's training-mode backward.", flush=True)
+        need_unused = not (
+            cfg.train.model_family == "moss_image"
+            and cfg.is_lora
+            and not cfg.self_flow.enabled
+        )
         self.accelerator = Accelerator(
             gradient_accumulation_steps=cfg.train.gradient_accumulation_steps,
             log_with=None,
-            kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True),
-                             self._process_group_kwargs()],
+            kwargs_handlers=[
+                DistributedDataParallelKwargs(
+                    find_unused_parameters=need_unused,
+                    gradient_as_bucket_view=True,
+                ),
+                self._process_group_kwargs(),
+            ],
             mixed_precision="no",
             dynamo_plugin=self._dynamo_plugin(),
         )
         if (cfg.quant.mode == "training" or cfg.quant.backend == "convrot" or cfg.quant.frozen_matmul) and self.accelerator.num_processes > 1:
             from .distributed import configure_quantized_ddp
-            self.accelerator.ddp_handler = configure_quantized_ddp()
+            self.accelerator.ddp_handler = configure_quantized_ddp(find_unused_parameters=need_unused)
         from .distributed import configure_moss_checkpoint_ddp
         configure_moss_checkpoint_ddp(cfg.train, self.accelerator.num_processes)
         from .attention_check import check_attention_backend
@@ -304,12 +314,30 @@ class Trainer:
             self.accelerator.print(f'Self-Flow enabled: block 4 -> 8, EMA {sf.ema_dtype} on {sf.ema_device}, '
                                   f'FP32 AdaLN={sf.adaln_fp32}, storage {self.self_flow_ema.nbytes / 2**30:.2f} GiB')
 
+        # Built after `_prepare` so it scales the adapter layers the prepared (DDP/compiled) model
+        # actually runs, and encodes its prompts while the text encoder or text cache is ready.
+        self.slider = None
+        if cfg.slider.enabled:
+            import gc
+            from .slider import ConceptSlider
+            self.slider = ConceptSlider(cfg.slider, self)
+            # Slider steps only use the 3-4 fixed prompts encoded above; drop any uncached live
+            # text encoder immediately so it does not stay resident in VRAM all run.
+            if not cfg.train.cache_text_embeddings and getattr(self, "text_encoder", None) is not None:
+                self.text_encoder = None
+                if getattr(self, "components", None) is not None:
+                    self.components.text_encoder = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
         self.successful_updates = 0
         self.skipped_updates = 0
         self.consecutive_nonfinite = 0
         self.global_step = 0
         self.start_epoch = 0
         self.resume_skip_batches = 0
+        self._last_update_lrs = None
         if cfg.train.resume_from and cfg.train.resume_mode == "exact":
             self._resume(cfg.train.resume_from)
 
@@ -323,11 +351,16 @@ class Trainer:
         cfg = self.cfg
         cfg.resolution_schedule.validate(cfg)
         dataset_cfg = replace(cfg.dataset, tier_collapse='repeat') if cfg.resolution_schedule.enabled else cfg.dataset
+        if cfg.slider.enabled:
+            # Slider steps never read dataset captions, so uncaptioned latents and stale caption
+            # modes (including MOSS JSON/bbox sidecars) must not trigger dataset caption loading.
+            from ..data.caption import CaptionConfig
+            dataset_cfg = replace(dataset_cfg, allow_missing_captions=True, caption=CaptionConfig())
         from ..data.moss_captions import layout_options
         self.dataset = MageFlowDataset(dataset_cfg, caption_seed=cfg.train.seed, **layout_options(cfg))
         from ..data.cache_provenance import validate_dataset_caches
         validate_dataset_caches(self.dataset, cfg.train, cfg.dataset.cache_validation)
-        from ..data.packed import NativeResolutionBatchSampler, collate_native
+        from ..data.packed import NativeResolutionBatchSampler, TokenBudgetBatchSampler, collate_native
         if cfg.resolution_schedule.enabled:
             from ..data.staged import StagedBatchSampler
             self.sampler = StagedBatchSampler(
@@ -344,23 +377,34 @@ class Trainer:
             self.total_steps = sum(self.sampler.budgets)
             self.steps_per_epoch = self.total_batches = 0
         else:
-            sampler_cls = NativeResolutionBatchSampler if cfg.train.pack_resolutions else BucketBatchSampler
-            self.sampler = sampler_cls(
-                self.dataset,
-                batch_size=cfg.train.batch_size,
-                shuffle=True,
-                drop_last=False,
-                seed=cfg.train.seed,
-            )
+            if cfg.train.pack_resolutions and cfg.train.pack_mode == "tokens":
+                self.sampler = TokenBudgetBatchSampler(
+                    self.dataset,
+                    token_budget=cfg.train.pack_token_budget,
+                    max_text_tokens=cfg.train.max_text_tokens,
+                    shuffle=True,
+                    drop_last=False,
+                    seed=cfg.train.seed,
+                    ddp_group_size=max(2, self.accelerator.num_processes),
+                )
+            else:
+                sampler_cls = NativeResolutionBatchSampler if cfg.train.pack_resolutions else BucketBatchSampler
+                self.sampler = sampler_cls(
+                    self.dataset,
+                    batch_size=cfg.train.batch_size,
+                    shuffle=True,
+                    drop_last=False,
+                    seed=cfg.train.seed,
+                )
             self.loader = DataLoader(
                 self.dataset,
                 batch_sampler=self.sampler,
                 collate_fn=collate_native if cfg.train.pack_resolutions else collate,
                 num_workers=cfg.train.num_workers,
                 pin_memory=True,
-                # Workers must be re-forked each epoch: the sampler's epoch is read at __iter__ time,
-                # and a persistent worker would keep serving batches built from a stale epoch.
-                persistent_workers=False,
+                # `batch_sampler.__iter__()` always executes in the main process and encodes
+                # epoch in each yielded index tuple, so workers can stay resident across epochs.
+                persistent_workers=cfg.train.num_workers > 0,
                 generator=torch.Generator().manual_seed(cfg.train.seed) if self.dataset.weighted else None,
             )
 
@@ -394,7 +438,10 @@ class Trainer:
 
         self.data_epoch = self.data_cursor = 0
         self.sampling_identity = None
-        if getattr(self.dataset, 'weighted', False) and not cfg.resolution_schedule.enabled:
+        if (
+            getattr(self.dataset, "weighted", False)
+            or (cfg.train.pack_resolutions and cfg.train.pack_mode == "tokens")
+        ) and not cfg.resolution_schedule.enabled:
             import hashlib
             payload = dict(version=2, dataset=asdict(cfg.dataset),
                            entries=[(str(e.latent_path.resolve()), e.bucket, e.resolution, *resume_caption_fields(e),
@@ -403,7 +450,9 @@ class Trainer:
                                     for e in self.dataset.entries],
                            batch=cfg.train.batch_size, world=self.accelerator.num_processes,
                            accumulation=cfg.train.gradient_accumulation_steps, seed=cfg.train.seed,
-                           epochs=cfg.train.epochs, max_steps=cfg.train.max_steps)
+                           epochs=cfg.train.epochs, max_steps=cfg.train.max_steps,
+                           **({"pack_mode": cfg.train.pack_mode, "pack_token_budget": cfg.train.pack_token_budget}
+                              if cfg.train.pack_resolutions and cfg.train.pack_mode == "tokens" else {}))
             self.sampling_identity = hashlib.sha256(json.dumps(payload, sort_keys=True, default=sorted).encode()).hexdigest()
 
         # Progress display. The bar is main-process-only: under DDP every rank runs this loop, and
@@ -497,6 +546,7 @@ class Trainer:
                 default_lr=cfg.optimizer.lr,
                 weight_decay=cfg.optimizer.weight_decay,
                 block_lr=cfg.block_lr,
+                loraplus_lr_ratio=cfg.adapter.loraplus_lr_ratio,
             )
             groups = self.param_report.groups
         else:
@@ -601,8 +651,7 @@ class Trainer:
             self.stage_lr_scheduler = StageLRScheduler(self.optimizer, cfg.schedule, self.sampler.budgets, scale)
             self.scheduler = self.stage_lr_scheduler
         else:
-            schedule = replace(cfg.schedule, warmup_steps=cfg.schedule.warmup_steps * scale)
-            self.scheduler = build_scheduler(self.optimizer, schedule, self.total_steps * scale)
+            self.scheduler = build_scheduler(self.optimizer, cfg.schedule, self.total_steps, ticks_per_update=scale)
 
     def _prepare(self):
         raw_optimizer = self.optimizer
@@ -641,14 +690,20 @@ class Trainer:
         import random
         from ..data.caption import build_caption
         from ..data.text_cache import TextEmbeddingCache, validate_static_captions
-        validate_static_captions(self.cfg)
         cfg = self.cfg
-        if cfg.train.caption_variations:
-            return self._build_variation_cache()
-        captions = sorted({build_caption(e.tags, e.nl, cfg.dataset.caption, random.Random(0), getattr(e, "moss", None))
-                           for e in self.dataset.entries})
-        if any(p.mode == "texture" for p in cfg.curriculum.phases):
-            captions = sorted(set(captions) | {cfg.dataset.texture.trigger})
+        if cfg.slider.enabled:
+            # Slider steps never read dataset captions, so only the slider's own prompts are
+            # encoded; the encoder is released before the transformer loads, as usual.
+            from .slider import ConceptSlider
+            captions = ConceptSlider.cached_prompts(cfg.slider)
+        else:
+            validate_static_captions(cfg)
+            if cfg.train.caption_variations:
+                return self._build_variation_cache()
+            captions = sorted({build_caption(e.tags, e.nl, cfg.dataset.caption, random.Random(0), getattr(e, "moss", None))
+                               for e in self.dataset.entries})
+            if any(p.mode == "texture" for p in cfg.curriculum.phases):
+                captions = sorted(set(captions) | {cfg.dataset.texture.trigger})
         if not captions:
             raise ValueError("No captions available for text embedding caching")
         components = load_components(cfg.train.model_path, self.dtype, **model_load_kwargs(cfg.train),
@@ -775,15 +830,17 @@ class Trainer:
         return torch.cat(out).float()
 
     def _step(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if getattr(self, "slider", None) is not None:
+            return self._step_slider(batch)
         if self.self_flow_ema is not None:
             return self._step_self_flow(batch)
         if self.cfg.train.pack_resolutions:
             return self._step_packed(batch)
         device = self.accelerator.device
         if "pixels" in batch:
-            latents = self._encode_pixels(batch["pixels"].to(device, self.dtype))
+            latents = self._encode_pixels(batch["pixels"].to(device, torch.float32, non_blocking=True))
         else:
-            latents = batch["latents"].to(device, torch.float32)
+            latents = batch["latents"].to(device, torch.float32, non_blocking=True)
 
         stats: dict = {}
         noisy, timesteps, target, second_t, token_mask = prepare_training_flow_batch(
@@ -803,11 +860,11 @@ class Trainer:
         )[0]
 
         # (B,1,h,w) -> (B,1,1,h,w) to broadcast over the latent's channel and time axes. Texture
-        # batches supervise only a feathered sub-region; the rest is real context that conditions
-        # the forward pass but carries no target.
+        # batches supervise only a feathered sub-region, and painted dataset masks weight it per
+        # image; the rest is real context that conditions the forward pass but carries no target.
         mask = batch.get("mask")
         if mask is not None:
-            mask = mask.to(device, torch.float32).unsqueeze(2)
+            mask = mask.to(device, torch.float32, non_blocking=True).unsqueeze(2)
 
         loss = flow_loss(pred, target, mask=mask)
         if self.paired_texture is not None:
@@ -833,6 +890,66 @@ class Trainer:
         # BF16 rounding here would condition on a different time than noising.
         dtype = torch.float32 if self.cfg.train.model_family == "moss_image" else self.dtype
         return timesteps.to(dtype)
+
+    def _step_slider(self, batch: dict) -> tuple[torch.Tensor, None]:
+        """Concept-slider step: the batch supplies noisy latents, the base model supplies targets.
+
+        Latents, noise, timesteps (curriculum t-range and dual timestep included) and the packed
+        layout are prepared exactly as in `_step` / `_step_packed`; every slider forward reuses
+        them, so the reference and signed predictions see identical inputs. See `slider.py` for
+        the objective and for why each signed pass gets its own backward.
+        """
+        from .slider import slider_step
+        if batch.get("mask") is not None:
+            raise ValueError("[slider] does not support masked batches")
+        device = self.accelerator.device
+        packed = self.cfg.train.pack_resolutions
+        if "pixels" in batch:
+            latents = ([self._encode_pixels(x.to(device, torch.float32, non_blocking=True)) for x in batch["pixels"]] if packed
+                       else self._encode_pixels(batch["pixels"].to(device, torch.float32, non_blocking=True)))
+        else:
+            latents = ([x.to(device, torch.float32, non_blocking=True) for x in batch["latents"]] if packed
+                       else batch["latents"].to(device, torch.float32, non_blocking=True))
+
+        stats: dict = {}
+        t_range = self.phase.t_range if self.phase else None
+        if packed:
+            prepared = [prepare_training_flow_batch(x, self.cfg.flow, t_range=t_range, **self.flow_rng.kwargs())
+                        for x in latents]
+            noisy, times, _, second_times, token_masks = zip(*prepared)
+            hidden = [x.to(self.dtype) for x in noisy]
+            call = {"timestep": self._conditioning_timesteps(torch.cat(times))}
+            if self.cfg.flow.dual_timestep:
+                call.update(second_timestep=torch.cat(second_times).to(self.dtype), timestep_mask=token_masks)
+        else:
+            noisy, timesteps, _, second_t, token_mask = prepare_training_flow_batch(
+                latents, self.cfg.flow, stats=stats, t_range=t_range,
+                **self.flow_rng.kwargs(),
+            )
+            hidden = noisy.to(self.dtype)
+            call = {"timestep": self._conditioning_timesteps(timesteps), "return_dict": False}
+            if second_t is not None:
+                call.update(second_timestep=second_t.to(self.dtype), timestep_mask=token_mask)
+        self.last_stats = stats
+
+        samples = len(batch["captions"])
+        contexts = {}
+
+        def forward(role: str):
+            if role not in contexts:
+                contexts[role] = self.slider.context(role, samples)
+            return self.transformer(hidden_states=hidden, encoder_hidden_states=contexts[role], **call)[0]
+
+        acc = self.accelerator
+        loss, slider_stats = slider_step(
+            self.cfg.slider, self.slider.strength, forward,
+            # Same per-image scaling as the trainer's own backward (gradient release is refused).
+            early_backward=lambda term: acc.backward(term * samples),
+            # Early passes accumulate locally; the final pass's backward reduces once under DDP.
+            early_context=lambda: acc.no_sync(self.transformer),
+        )
+        self.last_stats.update(slider_stats)
+        return loss, None
 
     def _step_self_flow(self, batch):
         from .self_flow import forward_probe
@@ -878,8 +995,8 @@ class Trainer:
 
     def _step_packed(self, batch):
         device = self.accelerator.device
-        latents = ([self._encode_pixels(x.to(device,self.dtype)) for x in batch["pixels"]]
-                   if "pixels" in batch else [x.to(device,torch.float32) for x in batch["latents"]])
+        latents = ([self._encode_pixels(x.to(device, torch.float32, non_blocking=True)) for x in batch["pixels"]]
+                   if "pixels" in batch else [x.to(device, torch.float32, non_blocking=True) for x in batch["latents"]])
         prepared = [prepare_training_flow_batch(x,self.cfg.flow, **self.flow_rng.kwargs()) for x in latents]
         noisy,times,targets,second_times,token_masks = zip(*prepared)
         ordinary_count = len(latents)
@@ -904,13 +1021,54 @@ class Trainer:
             **({"second_timestep": torch.cat(second_times).to(self.dtype),
                 "timestep_mask": token_masks} if self.cfg.flow.dual_timestep else {}),
             **({"keep_fraction": self.keep_fraction} if self.rti_interface is not None else {}))[0]
-        # Equal sample weighting: a large image must not gain extra influence merely
-        # because it contributes more tokens to the packed attention kernel.
-        loss = torch.stack([flow_loss(y,t) for y,t in
-                            zip(predictions[:ordinary_count],targets[:ordinary_count])]).mean()
+        # Painted loss masks, (1,1,h,w) per sample -> (1,1,1,h,w).
+        masks = (
+            [m.to(device, torch.float32, non_blocking=True).unsqueeze(2) for m in batch["mask"]]
+            if batch.get("mask") is not None
+            else [None] * ordinary_count
+        )
+        if self.cfg.train.pack_mode == "tokens":
+            # MOSS paper Eq. (3): per-token normalization across all valid image tokens in the pack,
+            # preserving mask weights when painted loss masks are present.
+            sq = sum(
+                (((y.float() - t.float()) ** 2) * m).sum()
+                if m is not None
+                else ((y.float() - t.float()) ** 2).sum()
+                for y, t, m in zip(predictions[:ordinary_count], targets[:ordinary_count], masks)
+            )
+            denom = sum(
+                (m.expand_as(t).sum() if m is not None else t.numel())
+                for y, t, m in zip(predictions[:ordinary_count], targets[:ordinary_count], masks)
+            )
+            denom_safe = denom.clamp(min=1.0) if isinstance(denom, torch.Tensor) else max(1, denom)
+            loss = sq / denom_safe
+            # Weight this microbatch by its spatial token count so variable-length packs
+            # maintain true Eq. (3) per-token weighting across accumulation & DDP ranks.
+            if any(m is not None for m in masks):
+                tok_w = sum(
+                    m.sum() if m is not None else float(t.shape[-2] * t.shape[-1])
+                    for t, m in zip(targets[:ordinary_count], masks)
+                )
+                self._last_step_weight = (
+                    tok_w.clamp(min=1.0) if isinstance(tok_w, torch.Tensor) else max(1.0, tok_w)
+                )
+            else:
+                self._last_step_weight = max(
+                    1, sum(t.shape[-2] * t.shape[-1] for t in targets[:ordinary_count])
+                )
+        else:
+            # Legacy equal sample weighting: a large image must not gain extra influence merely
+            # because it contributes more tokens to the packed attention kernel.
+            loss = torch.stack([flow_loss(y,t,mask=m) for y,t,m in
+                                zip(predictions[:ordinary_count],targets[:ordinary_count],masks)]).mean()
         if dedicated:
             # Keep ordinary loss unchanged; extra example has one full-batch sample's weight.
-            loss = loss + flow_loss(predictions[-1],targets[-1])/self.cfg.train.batch_size
+            denom_batch = (
+                max(1, ordinary_count)
+                if self.cfg.train.pack_mode == "tokens" or not isinstance(self.cfg.train.batch_size, int)
+                else self.cfg.train.batch_size
+            )
+            loss = loss + flow_loss(predictions[-1],targets[-1])/denom_batch
         self.last_stats = {}
         if self.paired_texture is not None:
             if batch.get('mask') is not None:
@@ -934,10 +1092,27 @@ class Trainer:
         loss = loss + self._preserve_term()
         if self.hf_patch is None:
             return loss,None
-        hf = self.cfg.flow.hf_scale * torch.stack([
-            hf_loss(y,n,x,effective_timesteps(t,s,m),self.hf_patch,self.cfg.flow.hf_exponent,
-                    **self.cfg.flow.hf_gate_kwargs())
-            for y,n,x,t,s,m in zip(predictions,noisy,latents,times,second_times,token_masks)]).mean()
+        hf_masks = masks + [None] * (len(predictions) - ordinary_count)
+        if self.cfg.train.pack_mode == "tokens":
+            weights = [
+                (lm.sum() if lm is not None else x.shape[-2] * x.shape[-1])
+                for x, lm in zip(latents, hf_masks)
+            ]
+            total_w = sum(weights)
+            total_w_safe = total_w.clamp(min=1.0) if isinstance(total_w, torch.Tensor) else max(1, total_w)
+            hf = self.cfg.flow.hf_scale * sum(
+                (w / total_w_safe) * hf_loss(y, n, x, effective_timesteps(t, s, m), self.hf_patch,
+                                             self.cfg.flow.hf_exponent, mask=lm, **self.cfg.flow.hf_gate_kwargs())
+                for w, y, n, x, t, s, m, lm in zip(
+                    weights, predictions, noisy, latents, times, second_times, token_masks, hf_masks
+                )
+            )
+        else:
+            hf = self.cfg.flow.hf_scale * torch.stack([
+                hf_loss(y,n,x,effective_timesteps(t,s,m),self.hf_patch,self.cfg.flow.hf_exponent,
+                        mask=lm,**self.cfg.flow.hf_gate_kwargs())
+                for y,n,x,t,s,m,lm in zip(
+                    predictions,noisy,latents,times,second_times,token_masks,hf_masks)]).mean()
         return loss+hf,hf
 
     def _preserve_term(self) -> torch.Tensor | float:
@@ -1097,8 +1272,14 @@ class Trainer:
             _emit(self, "optim    gradient release enabled (single GPU; updates during backward)")
         trainable = [p for p in self._all_modules_params() if p.requires_grad]
         done = False
-        from .step_safety import global_sample_scale, scale_gradients, gradient_norm, globally_finite
-        local_samples = 0
+        from .step_safety import (
+            clip_gradients_with_norm,
+            global_sample_scale,
+            globally_finite,
+            gradient_norm,
+            scale_gradients,
+        )
+        local_weight = 0
         finite_losses = torch.ones((), dtype=torch.bool, device=acc.device)
         loss_sum = torch.zeros((), device=acc.device)
         hf_sum = torch.zeros((), device=acc.device)
@@ -1127,25 +1308,39 @@ class Trainer:
                 self._set_phase()
                 self._set_rti_budget()
                 with acc.accumulate(self.transformer):
+                    self._last_step_weight = None
                     loss, hf = self._step(batch)
                     if cfg.optimizer.gradient_release:
                         self._apply_lr_mul()  # Hook updates happen inside backward.
+                        if cfg.resolution_schedule.enabled or (
+                            getattr(self, "phase", None) is not None and self.phase.lr_mul != 1.0
+                        ):
+                            self._last_update_lrs = [group["lr"] for group in self.optimizer.param_groups]
+                        else:
+                            self._last_update_lrs = None
                     samples = len(batch["captions"])
-                    local_samples += samples
+                    step_weight = self._last_step_weight if self._last_step_weight is not None else samples
+                    local_weight = local_weight + step_weight
                     finite_losses &= torch.isfinite(loss.detach())
-                    loss_sum += loss.detach().float() * samples
+                    loss_sum += loss.detach().float() * step_weight
                     if hf is not None:
-                        hf_sum += hf.detach().float() * samples
+                        hf_sum += hf.detach().float() * step_weight
                         hf_present = True
                     if cfg.optimizer.gradient_release and not bool(finite_losses.item()):
                         raise FloatingPointError("Nonfinite loss before gradient-release backward")
                     # Accelerate divides by accumulation_steps; DDP averages ranks.
-                    # Restore an equal-per-image mean across the entire update below.
-                    acc.backward(loss if cfg.optimizer.gradient_release else loss * samples)
+                    # Restore an equal-per-image (or per-token for pack_mode='tokens') mean across the update.
+                    try:
+                        acc.backward(loss if cfg.optimizer.gradient_release else loss * step_weight)
+                    finally:
+                        if getattr(self, "slider", None) is not None:
+                            # The last slider pass ran at strength -1 and its backward (which may
+                            # recompute checkpointed blocks) has now finished, or raised; back to +1.
+                            self.slider.after_backward()
                     update_ok = False
                     if acc.sync_gradients:
                         if not cfg.optimizer.gradient_release:
-                            scale = global_sample_scale(local_samples, cfg.train.gradient_accumulation_steps, acc.device)
+                            scale = global_sample_scale(local_weight, cfg.train.gradient_accumulation_steps, acc.device)
                             scale_gradients(trainable, scale)
                             self.last_grad_norm = gradient_norm(trainable, acc.device).detach()
                             update_ok = globally_finite(finite_losses, self.last_grad_norm)
@@ -1154,10 +1349,14 @@ class Trainer:
                         if update_ok:
                             if not cfg.optimizer.gradient_release:
                                 if cfg.optimizer.max_grad_norm > 0:
-                                    torch.nn.utils.clip_grad_norm_(trainable, cfg.optimizer.max_grad_norm)
+                                    clip_gradients_with_norm(trainable, cfg.optimizer.max_grad_norm, self.last_grad_norm)
                                 self._apply_lr_mul()
-                                if cfg.resolution_schedule.enabled:
+                                if cfg.resolution_schedule.enabled or (
+                                    getattr(self, "phase", None) is not None and self.phase.lr_mul != 1.0
+                                ):
                                     self._last_update_lrs = [group['lr'] for group in self.optimizer.param_groups]
+                                else:
+                                    self._last_update_lrs = None
                                 if acc.num_processes > 1:
                                     from .distributed import quantized_optimizer_rng
                                     with quantized_optimizer_rng(acc.device, cfg.train.seed, self.global_step):
@@ -1189,16 +1388,20 @@ class Trainer:
                     from .distributed import quantized_optimizer_rng
                     with quantized_optimizer_rng(acc.device, cfg.train.seed + 7919, self.global_step):
                         self.self_flow_ema.update()
-                # Log the same global image-weighted loss that supplies the gradients.
-                totals = torch.stack((loss_sum, loss_sum.new_tensor(local_samples), hf_sum,
-                                      loss_sum.new_tensor(hf_present)))
+                # Log the same global weight-averaged loss that supplies the gradients.
+                weight_t = (
+                    local_weight.detach().to(device=loss_sum.device, dtype=loss_sum.dtype)
+                    if isinstance(local_weight, torch.Tensor)
+                    else loss_sum.new_tensor(local_weight)
+                )
+                totals = torch.stack((loss_sum, weight_t, hf_sum))
                 if acc.num_processes > 1:
                     torch.distributed.all_reduce(totals)
                 loss = totals[0] / totals[1]
-                hf = totals[2] / totals[1] if totals[3].item() else None
+                hf = totals[2] / totals[1] if hf_present else None
                 hf_sum.zero_()
                 hf_present = False
-                local_samples = 0
+                local_weight = 0
                 finite_losses.fill_(True)
                 loss_sum.zero_()
                 if self.consecutive_nonfinite >= cfg.train.nonfinite_patience:
@@ -1269,11 +1472,9 @@ class Trainer:
         self, loss: torch.Tensor, hf: torch.Tensor | None, epoch: int, t0: float
     ) -> None:
         acc = self.accelerator
-        value = acc.gather(loss.detach().float().repeat(1)).mean().item()
-        # gather is collective, so it must run on every rank or the non-main ranks deadlock.
-        hf_value = (
-            acc.gather(hf.detach().float().repeat(1)).mean().item() if hf is not None else None
-        )
+        # `loss` and `hf` are already globally all_reduced before `_log()` is called.
+        value = loss.detach().float().item()
+        hf_value = hf.detach().float().item() if hf is not None else None
 
         # Peak memory must be gathered, not read locally: ranks are NOT symmetric. Rank 0 carries
         # NCCL buffers and does the checkpoint export, so reporting only its number both overstates
@@ -1297,9 +1498,14 @@ class Trainer:
         # A/B GB` convention already used for per-rank memory, and collapsed to one number when the
         # groups agree, so the common case reads as before. The startup report names the groups in
         # this same order.
-        # The scheduler has already advanced to the next unscaled rate. Staged
-        # logs must show the penalized LR that produced the reported update.
-        lrs = (self._last_update_lrs if self.cfg.resolution_schedule.enabled
+        # The scheduler has already advanced to the next unscaled rate. Staged and
+        # curriculum-phase logs must show the scaled LR that produced the reported update.
+        has_scaled_lr = (
+            self.cfg.resolution_schedule.enabled
+            or (getattr(self, "phase", None) is not None and self.phase.lr_mul != 1.0)
+        )
+        lrs = (self._last_update_lrs
+               if (has_scaled_lr and getattr(self, "_last_update_lrs", None) is not None)
                else self.scheduler.get_last_lr())
         lr = "/".join(f"{v:.2e}" for v in lrs) if len(set(lrs)) > 1 else f"{lrs[0]:.2e}"
         dt = (time.time() - t0) / max(1, self.cfg.train.log_every)
@@ -1319,6 +1525,12 @@ class Trainer:
             parts += f"  lpips {self.last_stats['lpips']:.4f}"
         if 'self_flow_alignment' in getattr(self, 'last_stats', {}):
             parts += f"  sf {self.last_stats['self_flow_alignment']:.4f}"
+        if 'slider_pos' in getattr(self, 'last_stats', {}):
+            # Weighted terms of `loss` for strength +1 / -1 (and the anchor, summed over both).
+            parts += (f"  pos {float(self.last_stats['slider_pos']):.4f}"
+                      f"  neg {float(self.last_stats['slider_neg']):.4f}")
+            if 'slider_anchor' in self.last_stats:
+                parts += f"  anchor {float(self.last_stats['slider_anchor']):.4f}"
         if hf_value is not None:
             parts += f" (mse {value - hf_value:.4f} + hf {hf_value:.4f})"
         if getattr(self, "last_grad_norm", None) is not None:
@@ -1399,6 +1611,18 @@ class Trainer:
         sample_total = (len(self.dataset.epoch_indices(0)) if getattr(self.dataset, 'weighted', False)
                         else len(self.dataset))
         print(f"\ndataset  {sample_total} samples/epoch, {len(self.sampler.bucket_indices)} buckets")
+        if getattr(self.dataset, "masked", False):
+            d = cfg.dataset
+            if getattr(self.dataset, "weighted", False):
+                indices = self.dataset.epoch_indices(0)
+                n_masked = sum(self.dataset.entries[i].mask is not None for i in indices)
+                denom_masked = len(indices)
+            else:
+                n_masked = sum(e.mask is not None for e in self.dataset.entries)
+                denom_masked = len(self.dataset)
+            print(f"masks    {n_masked}/{denom_masked} samples painted, outside weight "
+                  f"{d.mask_outside_weight:g}, dilate {d.mask_dilate_px}px, feather "
+                  f"{d.mask_feather_px:g}px")
         subsets = getattr(self.dataset, "subset_report", [])
         if len(subsets) > 1:
             # Worth printing even though it is configured: a subset's share of the epoch is
@@ -1407,6 +1631,8 @@ class Trainer:
             sample_total = max(1, sample_total)
             for sub, n in subsets:
                 flag = "" if sub.texture else "  [fullres only -- keeps its captions]"
+                if sub.mask_path and cfg.dataset.use_masks:
+                    flag += "  [masked]"
                 weighting = f'target {sub.target_images}' if sub.target_images is not None else f'x{sub.num_repeats:g}'
                 print(f"         {Path(sub.path).name:<24} {n:>6} entries  {100 * n / sample_total:4.1f}% "
                       f"of the {'dataset' if cfg.resolution_schedule.enabled else 'epoch'}  {weighting}{flag}")
@@ -1439,6 +1665,10 @@ class Trainer:
                       "progressively worsening anatomy twice. You are re-testing an unproven fix; "
                       "compare against a single-GPU control at matched steps.")
         print(f"mode     {'LoRA/' + cfg.adapter.kind if cfg.is_lora else 'full finetune'}")
+        if getattr(self, "slider", None) is not None:
+            print(self.slider.describe())
+        if cfg.adapter.kind == "lora" and cfg.adapter.loraplus_lr_ratio != 1.0:
+            print(f"loraplus lora_B LR x{cfg.adapter.loraplus_lr_ratio:g} (PEFT LoRA+)")
         print(f"params   {trainable / 1e6:.2f}M trainable / {total / 1e6:.2f}M total")
         if self.param_report is not None:
             print(self.param_report.summary())
@@ -1469,12 +1699,15 @@ class Trainer:
         if f.timestep_sample_method == "logit_normal":
             flow_bits.append(f"mean {f.logit_mean:g}, std {f.sigmoid_scale:g}")
         elif f.timestep_sample_method == "moss":
-            flow_bits.append(f"Kohaku static recipe mu={f.moss_mu:g}, std={f.moss_std:g}, "
+            mode_label = "resolution-aware" if f.res_shift else "static"
+            flow_bits.append(f"MOSS {mode_label} recipe mu={f.moss_mu:g}, std={f.moss_std:g}, "
                              f"cutoff={f.moss_cutoff:g}, uniform={f.moss_uniform_mix:g}, "
                              f"p_full={f.moss_p_full:g}, grid={f.moss_steps}")
         flow_bits.append(f"cabal_shift (1024px anchor={f.shift:g}, offset={f.cabal_shift_offset:g})"
                          if f.cabal_shift else "flux_shift" if f.flux_shift
-                         else f"shift {f.shift if f.shift else 'none'}")
+                         else (f"res_shift (1024px anchor={'mu=' + format(f.moss_mu, 'g') if f.timestep_sample_method == 'moss' else format(f.shift, 'g')})"
+                               if f.res_shift
+                               else f"shift {f.shift if f.shift else 'none'}"))
         if f.normal_low_snr:
             flow_bits.append('normal_low_snr ON')
         if f.dual_timestep:
@@ -1490,6 +1723,14 @@ class Trainer:
             note = f" -- NO-OP in {len(ones)} bucket(s) at batch size 1" if ones else ""
             flow_bits.append(f"optimal transport ON{note}")
         print(f"flow     {', '.join(flow_bits)}")
+        if cfg.train.pack_resolutions and not cfg.resolution_schedule.enabled:
+            if cfg.train.pack_mode == "tokens" and hasattr(self.sampler, "pack_stats"):
+                avg_imgs, avg_toks, oversized = self.sampler.pack_stats()
+                extra = f", {oversized} oversized singleton(s)" if oversized else ""
+                print(f"packing  MOSS token budget <= {cfg.train.pack_token_budget} tokens "
+                      f"(per-token Eq.3 loss, ~{avg_imgs:.2f} imgs/pack, ~{avg_toks:.0f} est tok/pack{extra})")
+            else:
+                print("packing  legacy fixed sample count (per-sample loss)")
         if cfg.train.compile:
             print(f"compile  {cfg.train.compile} (dynamic={cfg.train.compile_dynamic}, "
                   f"regional={cfg.train.compile_regional}); first steps include compile time")
@@ -1765,7 +2006,7 @@ class Trainer:
         self.cfg.block_lr.check_resume(saved_state.get('block_lr_multipliers'))
         sampling = saved_state.get('sampling_state')
         if bool(sampling) != bool(getattr(self, 'sampling_identity', None)):
-            raise ValueError('Full-state resume must preserve dataset weighting; use weights-only for a new plan')
+            raise ValueError('Full-state resume must preserve dataset weighting and token-packing mode; use weights-only for a new plan')
         if sampling and sampling['identity'] != self.sampling_identity:
             raise ValueError('Resume dataset weighting/data/batching changed; use weights-only for a new plan')
         staged = saved_state.get('resolution_schedule_state')

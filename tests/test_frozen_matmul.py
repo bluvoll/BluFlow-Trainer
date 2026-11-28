@@ -34,12 +34,53 @@ def test_preset_cli_roundtrip_and_encoder_isolation(tmp_path,preset,dtype,qmm,ro
 
 @pytest.mark.parametrize('section,key,value', [
     ('train','model_family','mage_flow'), ('train','dtype','float32'),
-    ('adapter','kind','none'), ('adapter','lycoris_algo','dora'),
+    ('adapter','kind','none'),
     ('adapter','lycoris_bypass',False), ('adapter','dtype','float32')])
 def test_accelerated_preset_rejects_unsupported_training(tmp_path,section,key,value):
     data=config_data();data[section][key]=value
     path=tmp_path/'bad.toml';path.write_text(toml.dumps(data))
     with pytest.raises(ValueError):load_config(path)
+
+
+@pytest.mark.parametrize('preset', ['standard', 'balanced', 'fast'])
+def test_dora_presets_and_block_lr_config_accepted(tmp_path, preset):
+    data = config_data(preset)
+    data['adapter'].update(lycoris_algo='dora', lycoris_bypass=False)
+    data['block_lr'] = dict(enabled=True, ranges=[dict(start=0, end=20, lr_mul=0.5), dict(start=21, end=41, lr_mul=1.0)])
+    path = tmp_path / f'dora-{preset}.toml'
+    path.write_text(toml.dumps(data))
+    cfg = load_config(path)
+    assert cfg.quant.preset == preset
+    assert cfg.adapter.lycoris_algo == 'dora'
+    assert cfg.block_lr.enabled is True
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA not available')
+@pytest.mark.parametrize('preset', ['standard', 'balanced', 'fast'])
+def test_dora_presets_cuda_nonsquare_and_block_lr(preset):
+    from trainer.modeling.moss_image import MOSSImage, MOSSParams
+    from trainer.training.block_lr import BlockLRConfig
+    from trainer.training.params import AdapterConfig, ComponentLRs, apply_adapter, build_adapter_param_groups
+
+    torch.manual_seed(11)
+    model = MOSSImage(MOSSParams(dim=256, ffn_dim=512, num_heads=4, num_layers=4, text_dim=256, latent_channels=128)).to('cuda', torch.bfloat16)
+    model = quantize_module(model, QuantConfig(preset=preset), torch.device('cuda'), torch.bfloat16)
+    apply_adapter(model, AdapterConfig(kind='lycoris_lora', lycoris_algo='dora', rank=4, alpha=4.0,
+                                       dtype='bfloat16', moss_train_text_refiner=False))
+    blk = BlockLRConfig(enabled=True, ranges=[dict(start=0, end=0, lr_mul=0.0), dict(start=1, end=3, lr_mul=0.5)])
+    report = build_adapter_param_groups(model, ComponentLRs(), 1e-4, block_lr=blk)
+    assert report.groups
+    model.configure_execution(gradient_checkpointing=True, compile_mode=None, attention_backend='torch_varlen')
+    xs = [torch.randn(1, 128, 1, 4, 4, device='cuda', dtype=torch.bfloat16)]
+    t = torch.tensor([0.5], device='cuda', dtype=torch.float32)
+    txt = torch.randn(1, 8, 256, device='cuda', dtype=torch.bfloat16)
+    mask = torch.ones(1, 8, device='cuda', dtype=torch.bool)
+    out = model(xs, t, (txt, mask))[0][0]
+    assert torch.isfinite(out).all()
+    out.float().square().mean().backward()
+    assert not any(n.startswith('layers.0.') and p.grad is not None for n, p in model.named_parameters())
+    assert any(n.startswith('layers.1.') and 'dora_scale' in n and p.grad is not None and torch.isfinite(p.grad).all()
+               for n, p in model.named_parameters())
 
 
 def test_legacy_settings_unchanged():
@@ -349,3 +390,74 @@ def test_peft_moss_ddp_updates(preset, ddp_device):
         reference = param.detach().clone()
         dist.broadcast(reference, 0)
         assert torch.equal(param, reference)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA not available')
+@pytest.mark.parametrize('preset', ['balanced', 'fast'])
+def test_shared_frozen_qkv_matches_sequential(preset):
+    import torch.nn.functional as F
+    from trainer.modeling.moss_image import MOSSImage, MOSSParams
+    from trainer.training.frozen_matmul import apply_shared_frozen_qkv
+    from trainer.training.params import AdapterConfig, apply_adapter
+
+    dev = torch.device('cuda')
+    torch.manual_seed(42)
+    model = MOSSImage(
+        MOSSParams(dim=256, ffn_dim=512, num_heads=4, num_layers=4, text_dim=256, latent_channels=128)
+    ).to(dev, torch.bfloat16)
+    model = quantize_module(model, QuantConfig(preset=preset), dev, torch.bfloat16)
+    apply_adapter(
+        model,
+        AdapterConfig(kind='lora', rank=8, alpha=8.0, dtype='bfloat16', moss_train_text_refiner=False),
+    )
+    blk = model.layers[1]
+
+    x0 = torch.randn(2, 64, 256, device=dev, dtype=torch.bfloat16, requires_grad=True)
+    x1 = x0.detach().clone().requires_grad_(True)
+
+    q_ref, k_ref, v_ref = blk.proj['q'](x0), blk.proj['k'](x0), blk.proj['v'](x0)
+    (q_ref.float().square().mean() + k_ref.float().sin().mean() + v_ref.float().cos().mean()).backward()
+    dx_ref = x0.grad.detach().clone()
+    dp_ref = {n: p.grad.detach().clone() for n, p in blk.named_parameters() if p.requires_grad and p.grad is not None}
+    model.zero_grad(set_to_none=True)
+
+    res = apply_shared_frozen_qkv(blk.proj['q'], blk.proj['k'], blk.proj['v'], x1)
+    assert res is not None
+    q_sh, k_sh, v_sh = res
+    assert torch.equal(q_ref, q_sh)
+    assert torch.equal(k_ref, k_sh)
+    assert torch.equal(v_ref, v_sh)
+    (q_sh.float().square().mean() + k_sh.float().sin().mean() + v_sh.float().cos().mean()).backward()
+    dx_sh = x1.grad.detach().clone()
+    dp_sh = {n: p.grad.detach().clone() for n, p in blk.named_parameters() if p.requires_grad and p.grad is not None}
+    assert set(dp_sh) == set(dp_ref)
+    assert (dx_ref - dx_sh).abs().max().item() < 1e-2
+    assert max((dp_ref[n] - dp_sh[n]).abs().max().item() for n in dp_ref) < 1e-3
+    assert F.cosine_similarity(dx_ref.float().flatten(), dx_sh.float().flatten(), dim=0).item() > 0.9999
+
+    model.zero_grad(set_to_none=True)
+    model.configure_execution(gradient_checkpointing=True, compile_mode='default', attention_backend='torch_varlen')
+    for _ in range(2):
+        xs = [torch.randn(1, 128, 1, 4, 4, device=dev, dtype=torch.bfloat16)]
+        t = torch.tensor([0.5], device=dev, dtype=torch.float32)
+        txt = torch.randn(1, 8, 256, device=dev, dtype=torch.bfloat16)
+        mask = torch.ones(1, 8, device=dev, dtype=torch.bool)
+        out = model(xs, t, (txt, mask))[0][0]
+        assert torch.isfinite(out).all()
+        out.float().square().mean().backward()
+        assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.requires_grad and p.grad is not None)
+        model.zero_grad(set_to_none=True)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA not available')
+def test_int8_calibration_eligible_tiles():
+    from trainer.training.int8_calibration import candidate_tiles, eligible_tiles
+
+    dev = torch.device('cuda')
+    cands = candidate_tiles()
+    a = torch.zeros((4096, 3072), device=dev, dtype=torch.int8)
+    b = torch.zeros((3072, 3072), device=dev, dtype=torch.int8).t()
+    sa = torch.ones((4096, 1), device=dev, dtype=torch.float32)
+    sb = torch.ones((1, 3072), device=dev, dtype=torch.float32)
+    tiles = eligible_tiles(cands, a, b, sa, sb)
+    assert tiles and all(t in cands for t in tiles)

@@ -80,9 +80,11 @@ class ResolutionSchedule:
 
     def validate(self, cfg):
         if not self.enabled:
-            if cfg.train.pack_resolutions and isinstance(cfg.train.batch_size, dict):
+            if cfg.train.pack_resolutions and cfg.train.pack_mode == "samples" and isinstance(cfg.train.batch_size, dict):
                 raise ValueError('Packed per-tier batch sizes require resolution_schedule.enabled=true')
             return
+        if cfg.train.pack_mode == "tokens":
+            raise ValueError("Staged resolution training uses per-tier batch sizes; set train.pack_mode='samples'")
         from ..modeling.loader import resolve_model_family
         if resolve_model_family(cfg.train.model_path, cfg.train.model_family) != 'moss_image':
             raise ValueError('Staged resolution training currently supports MOSS only')

@@ -45,6 +45,7 @@ class FlowConfig:
     normal_low_snr: bool = False
     cabal_shift: bool = False
     cabal_shift_offset: float = 0.0
+    res_shift: bool = False          # resolution-aware SNR scaling: shift * sqrt(N/4096) or MOSS mu - 0.5*ln(N/4096)
     moss_mu: float = -1.09
     moss_std: float = 0.95
     moss_cutoff: float = 0.95
@@ -68,16 +69,18 @@ class FlowConfig:
     hf_high_noise_power: float = 1.0
 
     def __post_init__(self):
-        for name in ('normal_low_snr', 'cabal_shift'):
+        for name in ('normal_low_snr', 'cabal_shift', 'res_shift'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f'flow.{name} must be a boolean')
         for name in ('logit_mean', 'cabal_shift_offset'):
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f'flow.{name} must be finite')
-        if self.cabal_shift and self.flux_shift:
-            raise ValueError('Cabal and Flux timestep shifts are mutually exclusive')
+        if sum((self.cabal_shift, self.flux_shift, self.res_shift)) > 1:
+            raise ValueError('Cabal, Flux, and resolution-aware SNR timestep shifts are mutually exclusive')
         if self.cabal_shift and self.shift is None:
             raise ValueError('Cabal shift needs a positive flow.shift anchor at 1024px')
+        if self.res_shift and self.timestep_sample_method != "moss" and self.shift is None:
+            raise ValueError('Resolution-aware SNR shift needs a positive flow.shift anchor at 1024px')
         if not 0 < self.dual_timestep_mask_ratio <= 0.5:
             raise ValueError("dual_timestep_mask_ratio must be in (0, 0.5]")
         if self.shift is not None and self.flux_shift:
@@ -123,6 +126,14 @@ class FlowConfig:
                 f"flow.sigmoid_scale={self.sigmoid_scale} only applies to "
                 f"timestep_sample_method='logit_normal'; the uniform sampler has no sigmoid to "
                 f"scale. Set timestep_sample_method='logit_normal' or drop sigmoid_scale."
+            )
+        if self.timestep_sample_method in ("uniform", "moss") and self.logit_mean != 0.0:
+            import warnings
+            warnings.warn(
+                f"flow.logit_mean={self.logit_mean} has no effect when "
+                f"timestep_sample_method={self.timestep_sample_method!r} (ignored).",
+                UserWarning,
+                stacklevel=2,
             )
         if not math.isfinite(self.sigmoid_scale) or self.sigmoid_scale <= 0.0:
             raise ValueError(f"flow.sigmoid_scale must be > 0, got {self.sigmoid_scale}")
@@ -170,12 +181,12 @@ def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device, generat
         t = torch.rand((n,), device=draw_device, generator=generator).to(device)
         if cfg.timestep_sample_method == "moss":
             from .moss_timesteps import inverse_cdf
-            t = inverse_cdf(t, cfg)
+            t = inverse_cdf(t, cfg, latent_h, latent_w)
 
     # Shift is applied *before* any range mapping, matching the reference implementation. The
     # other order is not equivalent -- shift is nonlinear, so shifting a rescaled t bends the
     # distribution differently inside the phase than rescaling a shifted one.
-    if cfg.cabal_shift:
+    if cfg.cabal_shift or (cfg.res_shift and cfg.timestep_sample_method != "moss"):
         from .timestep_distribution import effective_shift
         t = apply_static_shift(t, effective_shift(cfg, latent_h, latent_w))
     elif cfg.shift is not None:
@@ -242,8 +253,8 @@ def sample_timesteps(
             base = torch.sigmoid(logits)
         elif cfg.timestep_sample_method == "moss":
             from .moss_timesteps import inverse_cdf
-            base = inverse_cdf(base, cfg)
-        if cfg.cabal_shift:
+            base = inverse_cdf(base, cfg, latent_h, latent_w)
+        if cfg.cabal_shift or (cfg.res_shift and cfg.timestep_sample_method != "moss"):
             from .timestep_distribution import effective_shift
             base = apply_static_shift(base, effective_shift(cfg, latent_h, latent_w))
         elif cfg.shift is not None:
@@ -395,7 +406,9 @@ def flow_loss(
         while mask.ndim < loss.ndim:
             mask = mask.unsqueeze(1)
         loss = loss * mask
-        return loss.sum() / mask.expand_as(loss).sum().clamp(min=1)
+        dims = tuple(range(1, loss.ndim))
+        per_sample = loss.sum(dim=dims) / mask.expand_as(loss).sum(dim=dims).clamp(min=1)
+        return per_sample.mean()
 
     return loss.mean()
 

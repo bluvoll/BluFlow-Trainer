@@ -111,7 +111,7 @@ SPEC: dict[str, Spec] = {
     "adversarial.warm_start": _spec(
         "Discriminator warm start",
         "Optional eye-discriminator safetensors checkpoint.",
-        lambda: F.PathEditor("file"),
+        lambda: F.PathEditor("file", optional=False),
     ),
     "perceptual.enabled": _spec(
         "Enable decoded supervision",
@@ -120,12 +120,12 @@ SPEC: dict[str, Spec] = {
         inline_label=True,
     ),
     "perceptual.weight": _spec(
-        "LPIPS weight", "Added to ordinary flow MSE.", lambda: F.FloatEditor(0, 100, 6)
+        "LPIPS weight", "Added to ordinary flow MSE.", lambda: F.FloatEditor(0, 100, step=0.01, decimals=6)
     ),
     "perceptual.max_t": _spec(
         "Maximum noise timestep",
         "Apply only to t at or below this threshold (0 is clean).",
-        lambda: F.FloatEditor(0.001, 1, 3),
+        lambda: F.FloatEditor(0.001, 1, step=0.01, decimals=3),
     ),
     "perceptual.every": _spec(
         "Every N microbatches",
@@ -135,12 +135,12 @@ SPEC: dict[str, Spec] = {
     "perceptual.cache_dir": _spec(
         "Decoded target cache",
         "Cache keyed by VAE checksum and latent contents.",
-        lambda: F.PathEditor("folder"),
+        lambda: F.PathEditor("folder", optional=False),
     ),
     "perceptual.eye_manifest": _spec(
         "Eye annotation manifest",
         "Optional approved eye manifest JSON. Empty uses whole-image LPIPS; unannotated samples receive flow loss only.",
-        lambda: F.PathEditor("file"),
+        lambda: F.PathEditor("file", optional=False),
     ),
     "perceptual.dedicated_low_noise": _spec(
         "Dedicated low-noise example",
@@ -179,12 +179,54 @@ SPEC: dict[str, Spec] = {
     "self_flow.decay": _spec(
         "EMA decay",
         "EMA = decay * teacher + (1-decay) * student after each optimizer update.",
-        lambda: F.FloatEditor(0, 0.999999, 6),
+        lambda: F.FloatEditor(0, 0.999999, step=0.001, decimals=6),
     ),
     "self_flow.weight": _spec(
         "Alignment loss weight",
         "Weight applied to cosine feature alignment loss.",
-        lambda: F.FloatEditor(0, 100, 4),
+        lambda: F.FloatEditor(0, 100, step=0.01, decimals=4),
+    ),
+    "slider.enabled": _spec(
+        "Train a concept slider",
+        "Port of ai-toolkit Concept Slider. Trains the adapter so strength +1 moves toward the "
+        "positive prompt and -1 toward the negative prompt; dataset images only supply noisy latents "
+        "and their captions are ignored. Each step runs 3-4 reference forwards plus one forward and "
+        "backward per slider end.",
+        lambda: F.BoolEditor("Train a concept slider instead of a LoRA"),
+        inline_label=True,
+    ),
+    "slider.target_class": _spec(
+        "Target class",
+        "The concept the slider acts on; the adapter is trained with this prompt. Empty means the "
+        "unconditional prompt.",
+        lambda: F.TextEditor("e.g. person"),
+    ),
+    "slider.positive_prompt": _spec(
+        "Positive prompt (+1)",
+        "Where strength +1 moves the target class.",
+        lambda: F.TextEditor("e.g. person who is happy"),
+    ),
+    "slider.negative_prompt": _spec(
+        "Negative prompt (-1)",
+        "Where strength -1 moves the target class.",
+        lambda: F.TextEditor("e.g. person who is sad"),
+    ),
+    "slider.anchor_class": _spec(
+        "Anchor class",
+        "Optional concept held at the base model while the slider moves. Empty disables the anchor "
+        "and its two extra forwards per step.",
+        lambda: F.TextEditor("optional"),
+    ),
+    "slider.guidance_strength": _spec(
+        "Guidance strength",
+        "How far each end is pushed: target = neutral +/- strength x (positive - negative), "
+        "renormalised to the neutral prediction.",
+        lambda: F.FloatEditor(-100, 100, step=0.5, decimals=3),
+    ),
+    "slider.anchor_strength": _spec(
+        "Anchor strength",
+        "Weight of the anchor term relative to the slider term.",
+        lambda: F.FloatEditor(0, 100, step=0.1, decimals=3),
     ),
     "rti.enabled": _spec(
         "Enable RTI",
@@ -210,12 +252,12 @@ SPEC: dict[str, Spec] = {
     "rti.start_keep": _spec(
         "Initial keep fraction",
         "Fraction of image tokens retained at the beginning of RTI compression.",
-        lambda: F.FloatEditor(0.001, 1.0, 4),
+        lambda: F.FloatEditor(0.001, 1.0, step=0.01, decimals=4),
     ),
     "rti.target_keep": _spec(
         "Target keep fraction",
         "Fraction retained after annealing.",
-        lambda: F.FloatEditor(0.001, 1.0, 4),
+        lambda: F.FloatEditor(0.001, 1.0, step=0.01, decimals=4),
     ),
     "rti.identity_steps": _spec(
         "Identity steps",
@@ -310,6 +352,22 @@ SPEC: dict[str, Spec] = {
         lambda: F.BoolEditor("Pack native resolutions"),
         inline_label=True,
     ),
+    "train.pack_mode": _spec(
+        "Packing mode",
+        "Legacy ('samples'): fixed number of images per microbatch (train.batch_size) with equal per-sample loss. "
+        "MOSS token budget ('tokens'): packs variable counts up to pack_token_budget image+text tokens with MOSS paper Eq. (3) per-token loss normalization and size-paired DDP balancing.",
+        lambda: F.ChoiceEditor(
+            ["Fixed samples (legacy)", "MOSS token budget (paper)"],
+            ["samples", "tokens"],
+        ),
+    ),
+    "train.pack_token_budget": _spec(
+        "Pack token budget",
+        "Maximum estimated image+text tokens packed into one microbatch under MOSS token-budget packing. "
+        "MOSS Stage 3 paper default is 8576 tokens (~two 1024px images or one 1280px + one 512px image). "
+        "Oversized single images still run as singletons.",
+        lambda: F.IntEditor(512, 65536, 128),
+    ),
     "train.checkpoint_blocks": _spec(
         "Checkpoint blocks",
         "Zero-based block indices; blank checkpoints all blocks.",
@@ -352,12 +410,12 @@ SPEC: dict[str, Spec] = {
     "train.model_path": _spec(
         "Model directory",
         "Local Mage-Flow repository, Flux3 BF16 package, or MOSS-Image package with transformer/, text_encoder/, tokenizer/ and vae/.",
-        lambda: F.PathEditor("folder"),
+        lambda: F.PathEditor("folder", optional=False),
     ),
     "train.output_dir": _spec(
         "Output directory",
         "Checkpoints land in <output_dir>/<run_name>/<tag>/.",
-        lambda: F.PathEditor("folder"),
+        lambda: F.PathEditor("folder", optional=False),
     ),
     "train.transformer_path": _spec(
         "Transformer file (optional)",
@@ -623,11 +681,20 @@ SPEC: dict[str, Spec] = {
         "batch size that fits.",
         lambda: F.ChoiceEditor(["auto", "images", "latents", "encode"]),
     ),
+    "dataset.allow_missing_captions": _spec(
+        "Allow missing captions",
+        "Cache and train images that have no .txt caption; they train with an empty caption (the "
+        "unconditional prompt). Off: latent caching stops and lists them, since a missing caption "
+        "is usually a mistake.\n\nAlways on for Concept Slider training, which ignores dataset "
+        "captions.",
+        lambda: F.BoolEditor("Train images without a .txt caption"),
+        inline_label=True,
+    ),
     "dataset.resolution": _spec(
         "Resolution (single tier)",
         "An AREA budget, not a side length: 1024 means ~1024x1024 worth of pixels, so 1920x1080 "
         "becomes 1344x768.\n\nIgnored when a multi-resolution ladder is set below.",
-        lambda: F.IntEditor(128, 1920, 64),
+        lambda: F.IntEditor(128, 8192, 64),
     ),
     "dataset.resolutions": _spec(
         "Multi-resolution ladder",
@@ -691,6 +758,41 @@ SPEC: dict[str, Spec] = {
     "dataset.target_images": _spec(
         "Image weighting", "Switch between fractional repeats and an exact source-image count per epoch and resolution. Zero disables a source.",
         lambda: F.ImageTargetEditor(),
+    ),
+    "dataset.mask_path": _spec(
+        "Mask folder",
+        "Grayscale loss masks for the Dataset directory, one per image, matched by filename stem "
+        "(img_001.png -> img_001.png here). White = learn this region, black = do not, grey = in "
+        "between. 16-bit PNGs and RGBA white-on-transparent PNGs are supported. The whole image "
+        "still conditions the model; only the training target is weighted, so a character can be "
+        "learned without its backgrounds.\n\nEvery image needs a mask once this is set. With "
+        "Dataset subsets, set the Masks column per folder instead. Empty = unmasked.",
+        lambda: F.PathEditor("folder"),
+    ),
+    "dataset.use_masks": _spec(
+        "Use masks",
+        "Off trains unmasked without clearing the mask folders, for an A/B against the same config.",
+        lambda: F.BoolEditor("Apply the painted loss masks"),
+        inline_label=True,
+    ),
+    "dataset.mask_outside_weight": _spec(
+        "Outside weight",
+        "Loss weight where a mask is black. 0 ignores those pixels entirely; 0.1-0.3 keeps a "
+        "little supervision on the background; 1 is the same as no mask.",
+        lambda: F.FloatEditor(0.0, 1.0, 0.05, 2),
+    ),
+    "dataset.mask_dilate_px": _spec(
+        "Grow (px)",
+        "Grow every mask by this many pixels at bucket resolution before it is reduced to the "
+        "16x latent grid; negative shrinks. A mask painted tight to a silhouette leaves its edge "
+        "half-supervised -- a few pixels of slack hands it back.",
+        lambda: F.IntEditor(-256, 256),
+    ),
+    "dataset.mask_feather_px": _spec(
+        "Feather (px)",
+        "Gaussian-soften every mask edge, in bucket pixels, after growing. A hard edge between "
+        "learned and ignored regions can train as a seam; about half the grow value is a sane start.",
+        lambda: F.FloatEditor(0.0, 128.0, 0.5, 1),
     ),
     # ------------------------------------------------------------------ texture crops
     "curriculum": _spec(
@@ -946,7 +1048,7 @@ SPEC: dict[str, Spec] = {
         "Pushes t higher (more noise). Inference default is 3.0. Latents "
         "here normalise to std ~0.69 rather than 1.0, so effective noise is already higher than a "
         "unit-variance schedule assumes -- shift < 3 is worth an A/B on illustration data.\n\n"
-        "Leave EMPTY for no shift. Do not type 0: the map sends every timestep to exactly 0, so "
+        "Leave EMPTY for no shift (saves shift=1.0). Do not type 0: the map sends every timestep to exactly 0, so "
         "the model is fed clean latents and asked to predict pure noise. Loss sits at 1.0 for the "
         "whole run and nothing is learned. Values <= 0 are rejected.",
         lambda: F.SciEditor("none", optional=True),
@@ -969,6 +1071,14 @@ SPEC: dict[str, Spec] = {
         "Additional shift offset scaled by effective image resolution / 1024. At 1024px the effective "
         "shift is Shift + offset. Default 0; negative values must still produce a positive shift at every resolution.",
         lambda: F.FloatEditor(-100, 100, 0.1, 3),
+    ),
+    "flow.res_shift": _spec(
+        "Resolution-aware SNR shift",
+        "Scale timestep shift by sqrt(tokens / 4096) anchored at 1024px for both MOSS and Logit Normal. "
+        "Under MOSS, shifts mu by -0.5*ln(N/4096) so 1024px stays bit-identical to the paper while 512px drops to ~1.49 and 1280px rises to ~3.72 on the native 1000-step grid. "
+        "Under Logit Normal/Uniform, scales flow.shift by sqrt(N/4096). Mutually exclusive with Flux and Cabal shift.",
+        lambda: F.BoolEditor("Resolution-aware SNR shift (sqrt(N/4096))"),
+        inline_label=True,
     ),
     "flow.phase_mapping": _spec(
         "Curriculum phase mapping",
@@ -1145,7 +1255,7 @@ SPEC: dict[str, Spec] = {
     ),
     "block_lr.enabled": _spec(
         "MOSS block learning rates",
-        "Experimental MOSS full finetuning / PEFT LoRA or LoKr / LyCORIS LoCon or LoKr multipliers for joint blocks 0–41. "
+        "Experimental MOSS full finetuning / PEFT LoRA or LoKr / LyCORIS LoCon, LoKr, or DoRA multipliers for joint blocks 0–41. "
         "Does not change rank, alpha, or inference strength. Disabled preserves the usual LR.",
         lambda: F.BoolEditor("Enable MOSS block LR multipliers"),
         inline_label=True,
@@ -1233,6 +1343,13 @@ SPEC: dict[str, Spec] = {
         "Applied to the adapter path only.",
         lambda: F.FloatEditor(0.0, 0.9, 0.05, 2),
     ),
+    "adapter.loraplus_lr_ratio": _spec(
+        "LoRA+ B LR ratio",
+        "Multiplies PEFT lora_B learning rate relative to lora_A (1.0 = standard LoRA). "
+        "Because PEFT Gaussian init starts lora_A large while lora_B starts at zero, 2–4x helps lora_B grow faster "
+        "without destabilizing lora_A. Composes with component LRs and MOSS block LRs. PEFT LoRA only.",
+        lambda: F.FloatEditor(0.1, 64.0, step=0.5, decimals=2),
+    ),
     "adapter.lokr_factor": _spec(
         "LoKr factor",
         "PEFT decompose_factor / LyCORIS factor. -1 selects balanced factorization. "
@@ -1259,7 +1376,7 @@ SPEC: dict[str, Spec] = {
         "MOSS adapter preset",
         "Standard: UINT8 storage with BF16 matmul. Balanced: Hadamard rotation + INT8 matmul. "
         "Fast: INT8 matmul without rotation. Presets override the locked quantization fields; "
-        "Custom preserves manual settings. Balanced/Fast support BF16 PEFT LoRA/LoKr or BF16 LyCORIS LoCon/LoKr with bypass. "
+        "Custom preserves manual settings. Balanced/Fast support BF16 PEFT LoRA/LoKr, bypass LyCORIS LoCon/LoKr, or LyCORIS DoRA. "
         "These presets are for MOSS adapters, not full finetuning.",
         lambda: F.ChoiceEditor(
             [
@@ -1374,9 +1491,20 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                     "dataset.path",
                     "dataset.source",
                     "dataset.cache_validation",
+                    "dataset.allow_missing_captions",
                     "dataset.target_images",
                     "dataset.num_repeats",
                     "dataset.subsets",
+                ],
+            ),
+            (
+                "Loss Masks",
+                [
+                    "dataset.mask_path",
+                    "dataset.use_masks",
+                    "dataset.mask_outside_weight",
+                    "dataset.mask_dilate_px",
+                    "dataset.mask_feather_px",
                 ],
             ),
             (
@@ -1506,6 +1634,8 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                     "train.compressed_adaln_dtype",
                     "train.gradient_checkpointing",
                     "train.pack_resolutions",
+                    "train.pack_mode",
+                    "train.pack_token_budget",
                     "train.checkpoint_blocks",
                     "train.attention_backend",
                     "train.max_text_tokens",
@@ -1624,10 +1754,23 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                     "adapter.dtype",
                     "adapter.alpha",
                     "adapter.dropout",
+                    "adapter.loraplus_lr_ratio",
                     "adapter.moss_train_text_refiner",
                 ],
             ),
             ("Full Finetuning", ["component_lr.adaln"]),
+            (
+                "Concept Slider",
+                [
+                    "slider.enabled",
+                    "slider.target_class",
+                    "slider.positive_prompt",
+                    "slider.negative_prompt",
+                    "slider.anchor_class",
+                    "slider.guidance_strength",
+                    "slider.anchor_strength",
+                ],
+            ),
             (
                 "Flow Matching",
                 [
@@ -1639,6 +1782,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
                     "flow.flux_shift",
                     "flow.cabal_shift",
                     "flow.cabal_shift_offset",
+                    "flow.res_shift",
                     "flow.use_ot",
                     "flow.phase_mapping",
                     "flow.moss_mu",
@@ -1782,6 +1926,7 @@ TRANSFORMED_GROUP_TITLES.update(
         "Text Encoder Adapter",
         "LoKr",
         "Concept Preservation",
+        "Concept Slider",
         "Full Finetuning",
         "Quantization",
         "Learning Rate Schedule",

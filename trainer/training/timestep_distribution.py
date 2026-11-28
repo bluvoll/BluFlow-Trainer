@@ -40,9 +40,27 @@ def cabal_shift(
     return shift
 
 
+def snr_res_shift(latent_h: float, latent_w: float, anchor: float = 3.0) -> float:
+    """Resolution-aware SNR shift anchored at 1024px (64x64 latent tokens): anchor * sqrt(N / 4096)."""
+    sequence = float(latent_h) * float(latent_w)
+    if not math.isfinite(sequence) or sequence <= 0:
+        raise ValueError(f"Invalid latent grid {latent_h}x{latent_w} for resolution-aware SNR shift")
+    shift = float(anchor) * math.sqrt(sequence / 4096.0)
+    if not math.isfinite(shift) or shift <= 0:
+        raise ValueError(f"Resolution-aware SNR shift must be finite and positive; got {shift:g}")
+    return shift
+
+
 def effective_shift(cfg: "FlowConfig", latent_h: float, latent_w: float) -> float:
+    if cfg.timestep_sample_method == "moss":
+        if cfg.res_shift:
+            from .moss_timesteps import effective_moss_mu
+            return math.exp(-effective_moss_mu(cfg.moss_mu, latent_h, latent_w, True))
+        return float(cfg.shift if cfg.shift is not None else 1.0)
     if cfg.cabal_shift:
         return cabal_shift(latent_h, latent_w, cfg.shift, cfg.cabal_shift_offset)
+    if cfg.res_shift:
+        return snr_res_shift(latent_h, latent_w, cfg.shift)
     if cfg.shift is not None:
         shift = cfg.shift
     elif cfg.flux_shift:
@@ -283,13 +301,15 @@ def probability_law(
     lo, hi = t_range if t_range is not None else (0.0, 1.0)
     if not 0 <= lo < hi <= 1:
         raise ValueError("Timestep range must satisfy 0 <= low < high <= 1")
+    from .moss_timesteps import effective_moss_mu
+    moss_mu = effective_moss_mu(cfg.moss_mu, latent_h, latent_w, cfg.res_shift)
     law = _base_law(
         cfg.timestep_sample_method,
         cfg.logit_mean,
         cfg.sigmoid_scale,
         effective_shift(cfg, latent_h, latent_w),
         (
-            cfg.moss_mu,
+            moss_mu,
             cfg.moss_std,
             cfg.moss_cutoff,
             cfg.moss_uniform_mix,

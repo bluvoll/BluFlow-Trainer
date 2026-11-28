@@ -12,6 +12,7 @@ SAMPLER_KEYS = (
     "flux_shift",
     "cabal_shift",
     "cabal_shift_offset",
+    "res_shift",
     "moss_mu",
     "moss_std",
     "moss_cutoff",
@@ -45,7 +46,7 @@ def distribution(cfg, latent_h=64, latent_w=64, bins=40):
 
 
 def resolution_distributions(cfg, flat):
-    if not (cfg.flux_shift or cfg.cabal_shift):
+    if not (cfg.flux_shift or cfg.cabal_shift or cfg.res_shift):
         return []
     if flat.get("resolution_schedule.enabled"):
         resolutions = [

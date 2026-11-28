@@ -33,6 +33,7 @@ from .preferences import Preferences
 from .process import (Job, Launch, ProcessRunner, audit_launch, cache_launch, concat_launch,
                       train_launch, training_env, toolchain_jobs, calibration_launch)
 from .schema import LAYOUT, SPEC
+from ..ui_core.rules import captions_optional as _captions_optional
 from .widgets import (
     DANGER,
     PROJECT_ROOT,
@@ -503,6 +504,8 @@ class TrainingGUI(QtWidgets.QWidget):
         self.proc_label.setText(
             f"→ {n} process{'es' if n > 1 else ''}"
             + ("" if MULTI_GPU_SUPPORTED else "  (Windows: single GPU only)"))
+        if hasattr(self, "start_btn"):
+            self._refresh()
 
     # ---------------------------------------------------------------- config I/O
 
@@ -650,6 +653,8 @@ class TrainingGUI(QtWidgets.QWidget):
             return
         merged = bridge.defaults(flat.get("optimizer.kind", "adamw"))
         merged.update(flat)
+        if merged.get("flow.flux_shift") and not merged.get("flow.cabal_shift") and not merged.get("flow.res_shift"):
+            merged["flow.shift"] = None
         if merged.get("adapter.kind") == "lycoris_lora" and "train.compile" not in flat:
             merged["train.compile"] = "default"
         self._apply(merged)
@@ -678,7 +683,7 @@ class TrainingGUI(QtWidgets.QWidget):
         self._lock_quant_preset()
         self._lock_moss_sampling()
         self._last_flow_selection = tuple(self.editors[k].get() for k in
-            ('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'))
+            ('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift', 'flow.res_shift'))
         self._refresh()
 
     def collect(self) -> dict:
@@ -688,6 +693,7 @@ class TrainingGUI(QtWidgets.QWidget):
             # Even an unfinished subset row switches away from the single-folder
             # source. Do not accidentally launch on the old, now-disabled folder.
             flat["dataset.path"] = None
+            flat["dataset.mask_path"] = None
         return flat
 
     def _managed_target(self, flat: dict) -> Path:
@@ -837,8 +843,8 @@ class TrainingGUI(QtWidgets.QWidget):
         previous['resolution_schedule.unit'] = getattr(self, '_last_resolution_unit', 'steps')
         previous['optimizer.kind'] = getattr(self, '_last_optimizer_kind', flat.get('optimizer.kind'))
         previous['adapter.kind'], previous['adapter.lycoris_algo'] = getattr(self, '_last_adapter_selection', (None, None))
-        for key, value in zip(('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'),
-                             getattr(self, '_last_flow_selection', ('logit_normal', False, False))):
+        for key, value in zip(('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift', 'flow.res_shift'),
+                             getattr(self, '_last_flow_selection', ('logit_normal', False, False, False))):
             previous[key] = value
         normalized = normalize(flat, previous)
         if bridge.IMPORTED_CAPTION in flat and bridge.IMPORTED_CAPTION not in normalized:
@@ -856,7 +862,7 @@ class TrainingGUI(QtWidgets.QWidget):
         self._last_optimizer_kind = normalized.get('optimizer.kind')
         self._last_adapter_selection = (normalized.get('adapter.kind'), normalized.get('adapter.lycoris_algo'))
         self._last_flow_selection = tuple(normalized.get(k) for k in
-            ('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift'))
+            ('flow.timestep_sample_method', 'flow.flux_shift', 'flow.cabal_shift', 'flow.res_shift'))
         self._refresh()
 
     def _use_windows_attention(self):
@@ -882,6 +888,7 @@ class TrainingGUI(QtWidgets.QWidget):
             widget.setVisible(not staged or not epoch_mode)
         for widget in self.rows.get('dataset.num_repeats', ()):
             widget.setVisible(flat.get('dataset.target_images') is None)
+        self.editors['resolution_schedule.stages'].set_unit(flat.get('resolution_schedule.unit', 'steps'))
         self.editors['resolution_schedule.stages'].preview(
             flat.get('train.epochs' if epoch_mode else 'train.max_steps'), flat.get('train.batch_size'), self.num_processes(),
             flat.get('train.gradient_accumulation_steps', 1), flat.get('resolution_schedule.unit', 'steps'))
@@ -898,7 +905,7 @@ class TrainingGUI(QtWidgets.QWidget):
                 flat.get("train.pack_resolutions") and flat.get("train.attention_backend") != "flash_attn_2")))
         self.timestep_plot.set_config(flat)
         has_subsets = self.editors["dataset.subsets"].table.rowCount() > 0
-        for key in ("dataset.path", "dataset.num_repeats", 'dataset.target_images'):
+        for key in ("dataset.path", "dataset.num_repeats", "dataset.target_images", "dataset.mask_path"):
             self.editors[key].set_enabled(not has_subsets)
             for widget in self.rows[key]:
                 widget.setEnabled(not has_subsets)
@@ -920,7 +927,7 @@ class TrainingGUI(QtWidgets.QWidget):
                 continue
             try:
                 on = bool(rule(flat)) and key not in locked_quant
-                if key in ('dataset.num_repeats', 'dataset.target_images') and has_subsets:
+                if key in ('dataset.num_repeats', 'dataset.target_images', 'dataset.mask_path') and has_subsets:
                     on = False
             except Exception:
                 on = True
@@ -1046,6 +1053,8 @@ class TrainingGUI(QtWidgets.QWidget):
         except ValueError as exc:            # unreachable from the checkboxes; a guard, not a path
             self.log(f"CONFIG ERROR: {exc}")
             return
+        if launch.env:
+            env.update(launch.env)
         if sys.platform == "win32":
             allocation = env.get("PYTORCH_ALLOC_CONF", env.get("PYTORCH_CUDA_ALLOC_CONF", ""))
             self.log(f"CUDA allocator settings: {allocation or 'native (default)'}")
@@ -1101,7 +1110,8 @@ class TrainingGUI(QtWidgets.QWidget):
         owner = self._queue_destinations.get(destination)
         if owner is not None and owner != entry.id and any(e.id == owner for e in self.run_queue.entries()):
             raise ValueError(f"Duplicate output directory/run_name: {destination}. Give each queued run a distinct name.")
-        steps = toolchain_jobs(entry.snapshot) + self._cache_jobs(flat) + [Job(train_launch(entry.snapshot, self.num_processes()), training=True)]
+        cache = [] if flat.get("dataset.source") in ("latents", "encode") else self._cache_jobs(flat)
+        steps = toolchain_jobs(entry.snapshot) + cache + [Job(train_launch(entry.snapshot, self.num_processes()), training=True)]
         self._queue_destinations[destination] = entry.id
         return [replace(job, config_path=entry.snapshot, config_digest=entry.digest,
                         queue_index=entry.id) for job in steps]
@@ -1254,8 +1264,9 @@ class TrainingGUI(QtWidgets.QWidget):
             return
         flat = self.collect()
         ok, err = bridge.validate(flat)
-        if not ok:
-            self.log(f"CONFIG ERROR: {err}")
+        errors = [text for level, text in bridge.advisories(flat, self.num_processes()) if level == "error"]
+        if not ok or errors:
+            self.log(f"CONFIG ERROR: {err or '; '.join(errors)}")
             return
         queued = self.run_queue.entries()
         if queued:
@@ -1282,7 +1293,7 @@ class TrainingGUI(QtWidgets.QWidget):
         # Cache first here too. Same reasoning as the pipeline: an uncached folder is silent, and
         # a warm cache makes this a no-op. A cache step that fails cancels the training, because
         # training past it is exactly the silent-wrong-dataset case.
-        cache_jobs = self._cache_jobs(flat)
+        cache_jobs = [] if flat.get("dataset.source") in ("latents", "encode") else self._cache_jobs(flat)
         jobs = toolchain_jobs(path) + cache_jobs + [Job(train_launch(path, self.num_processes()),
                                              training=True)]
         if cache_jobs:
@@ -1338,6 +1349,8 @@ class TrainingGUI(QtWidgets.QWidget):
         other one and produces a LoRA of the wrong thing.
         """
         tiers = flat.get("dataset.resolutions") or [flat.get("dataset.resolution") or 1024]
+        chosen = self.selected_gpus()
+        devices = ",".join(str(i) for i in chosen) if len(chosen) > 1 else ""
         return [Job(cache_launch(
             pth, flat.get("train.model_path") or "", tiers,
             vae_path=flat.get("train.vae_path"),
@@ -1349,7 +1362,9 @@ class TrainingGUI(QtWidgets.QWidget):
             bucket_reso_steps=flat.get("dataset.bucket_reso_steps") or 64,
             upscale=not flat.get("dataset.bucket_no_upscale", True),
             multires_training=bool(flat.get("dataset.multires_training")),
+            allow_missing_captions=_captions_optional(flat),
             gpus=self.gpu_arg(),
+            devices=devices,
         )) for pth in self._dataset_paths(flat)]
 
     def _start_pipeline(self):
@@ -1360,8 +1375,9 @@ class TrainingGUI(QtWidgets.QWidget):
         """
         flat = self.collect()
         ok, err = bridge.validate(flat)
-        if not ok:
-            self.log(f"CONFIG ERROR: {err}")
+        errors = [text for level, text in bridge.advisories(flat, self.num_processes()) if level == "error"]
+        if not ok or errors:
+            self.log(f"CONFIG ERROR: {err or '; '.join(errors)}")
             return
         if flat.get("adapter.kind") != "lora":
             self.log("The paired pipeline needs adapter.kind = 'lora' "
@@ -1377,7 +1393,7 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log("Nothing to train on -- set a Dataset path, or give the subset rows a folder.")
             return
 
-        jobs = self._cache_jobs(flat)
+        jobs = [] if flat.get("dataset.source") in ("latents", "encode") else self._cache_jobs(flat)
 
         out_dir = Path(flat.get("train.output_dir") or "output")
         base = safe_stem(flat.get("train.run_name")) or "run"
@@ -1450,6 +1466,8 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log("Nothing to cache -- choose an active dataset folder. Zero repeats or a zero target disables a folder.")
             return
         tiers = c.get("dataset.resolutions") or [c.get("dataset.resolution") or 1024]
+        chosen = self.selected_gpus()
+        devices = ",".join(str(i) for i in chosen) if len(chosen) > 1 else ""
         self._run_each([cache_launch(
             p, c.get("train.model_path") or "", tiers,
             vae_path=c.get("train.vae_path"),
@@ -1461,7 +1479,8 @@ class TrainingGUI(QtWidgets.QWidget):
             bucket_reso_steps=c.get("dataset.bucket_reso_steps") or 64,
             upscale=not c.get("dataset.bucket_no_upscale", True),
             multires_training=bool(c.get("dataset.multires_training")),
-            dry_run=dry, gpus=self.gpu_arg(),
+            allow_missing_captions=_captions_optional(c),
+            dry_run=dry, gpus=self.gpu_arg(), devices=devices,
         ) for p in paths], "Caching")
 
     def _audit(self):

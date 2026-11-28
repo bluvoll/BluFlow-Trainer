@@ -19,6 +19,7 @@ from .flow import FlowConfig
 from .params import AdapterConfig, ComponentLRs
 from .block_lr import BlockLRConfig
 from .preserve import PreserveConfig
+from .slider import SliderConfig, validate_slider_options
 from .perceptual import PerceptualConfig
 from .eye_adversarial import EyeAdversarialConfig
 from .paired_texture import PairedTextureConfig
@@ -187,6 +188,8 @@ class TrainConfig:
     batch_size: int | dict[int, int] = 1
     gradient_accumulation_steps: int = 1
     pack_resolutions: bool = False
+    pack_mode: str = "samples"          # "samples" (legacy fixed batch_size, per-sample loss) | "tokens" (MOSS token budget, per-token loss)
+    pack_token_budget: int = 8576       # MOSS paper Stage 3 default: 8576 image+text tokens per pack
     checkpoint_blocks: list[int] | None = None
     attention_backend: str = "sdpa"
     cache_text_embeddings: bool = False
@@ -271,7 +274,18 @@ class TrainConfig:
         validate_windows_attention(self.attention_backend, self.pack_resolutions)
         from ..modeling.loader import resolve_model_family
         allows_sdpa_packing = resolve_model_family(self.model_path, self.model_family) in ('flux3', 'moss_image')
-        if self.pack_resolutions and ((self.attention_backend == "sdpa" and not allows_sdpa_packing) or (not isinstance(self.batch_size, dict) and (type(self.batch_size) is not int or self.batch_size < 1))):
+        if self.pack_mode not in ("samples", "tokens"):
+            raise ValueError("train.pack_mode must be 'samples' or 'tokens'")
+        if type(self.pack_token_budget) is not int or self.pack_token_budget < 512:
+            raise ValueError("train.pack_token_budget must be an integer >= 512")
+        if self.pack_resolutions and (
+            (self.attention_backend == "sdpa" and not allows_sdpa_packing)
+            or (
+                self.pack_mode == "samples"
+                and not isinstance(self.batch_size, dict)
+                and (type(self.batch_size) is not int or self.batch_size < 1)
+            )
+        ):
             raise ValueError("pack_resolutions requires packed attention and a positive batch_size")
         if type(self.text_cache_batch_size) is not int or self.text_cache_batch_size < 1:
             raise ValueError("train.text_cache_batch_size must be a positive integer")
@@ -356,6 +370,7 @@ class Config:
     perceptual: PerceptualConfig = field(default_factory=PerceptualConfig)
     adversarial: EyeAdversarialConfig = field(default_factory=EyeAdversarialConfig)
     paired_texture: PairedTextureConfig = field(default_factory=PairedTextureConfig)
+    slider: SliderConfig = field(default_factory=SliderConfig)
     # `[[curriculum]]` -- an array of tables, so it is built by hand in `load_config` rather than
     # through `_SECTIONS`. Empty by default; an empty curriculum is exactly today's behaviour.
     curriculum: Curriculum = field(default_factory=Curriculum)
@@ -384,6 +399,7 @@ _SECTIONS = {
     "perceptual": PerceptualConfig,
     "adversarial": EyeAdversarialConfig,
     "paired_texture": PairedTextureConfig,
+    "slider": SliderConfig,
 }
 
 
@@ -408,6 +424,22 @@ def validate_model_options(cfg):
                                      or any(p.mode == 'texture' for p in cfg.curriculum.phases)):
         raise ValueError('Paired texture loss requires scalar timesteps and unmasked images; '
                          'dual timestep, Self-Flow and texture curriculum phases are unsupported')
+    if cfg.dataset.masked:
+        # Painted masks weight the per-cell flow (and HF) loss. The terms below compare whole
+        # decoded images or global feature statistics, so there is no per-pixel weight to give them;
+        # refused here rather than at the first batch, which the GUI never reaches.
+        unsupported = [name for name, on in (
+            ("paired_texture", bool(cfg.paired_texture.scale)), ("self_flow", cfg.self_flow.enabled),
+            ("perceptual", cfg.perceptual.enabled), ("adversarial", cfg.adversarial.enabled)) if on]
+        if unsupported:
+            raise ValueError(f"painted dataset masks weight the flow loss only and cannot be combined "
+                             f"with {', '.join(unsupported)}; disable it or set dataset.use_masks = false")
+        if (any(p.mode == 'texture' for p in cfg.curriculum.phases)
+                and any(s.mask_path and s.texture for s in cfg.dataset.active_subsets())):
+            raise ValueError("texture crops are cut per step from the source and do not carry painted "
+                             "masks; list masked folders as [[dataset.subsets]] with texture = false, "
+                             "or drop the texture curriculum phases")
+    validate_slider_options(cfg)
     if cfg.adversarial.enabled and (not cfg.perceptual.enabled
                                     or not cfg.perceptual.dedicated_low_noise
                                     or cfg.perceptual.weight != 0):
@@ -418,8 +450,8 @@ def validate_model_options(cfg):
         raise ValueError("MOSS sidecar caption variants require a MOSS-Image model")
     if cfg.block_lr.enabled and (cfg.train.model_family != 'moss_image' or not (
             cfg.adapter.kind in ('none', 'lora', 'lokr') or (cfg.adapter.kind == 'lycoris_lora'
-                                         and cfg.adapter.lycoris_algo in ('locon', 'lokr')))):
-        raise ValueError('Experimental block LR requires MOSS full finetuning, PEFT LoRA/LoKr or LyCORIS LoCon/LoKr training')
+                                         and cfg.adapter.lycoris_algo in ('locon', 'lokr', 'dora')))):
+        raise ValueError('Experimental block LR requires MOSS full finetuning, PEFT LoRA/LoKr or LyCORIS LoCon/LoKr/DoRA training')
     if cfg.train.moss_checkpoint_inside_compile and cfg.train.model_family != "moss_image":
         raise ValueError("train.moss_checkpoint_inside_compile requires MOSS-Image")
     if cfg.quant.preset != "custom" and (
@@ -429,8 +461,11 @@ def validate_model_options(cfg):
                          "use quant.preset='custom' for full finetuning or other models")
     if cfg.quant.frozen_matmul:
         supported_adapter = cfg.adapter.kind in ("lora", "lokr") or (
-            cfg.adapter.kind == "lycoris_lora" and cfg.adapter.lycoris_algo in ("locon", "lokr")
-            and cfg.adapter.lycoris_bypass
+            cfg.adapter.kind == "lycoris_lora"
+            and (
+                (cfg.adapter.lycoris_algo in ("locon", "lokr") and cfg.adapter.lycoris_bypass)
+                or cfg.adapter.lycoris_algo == "dora"
+            )
         )
         if (cfg.train.model_family != "moss_image" or cfg.train.dtype != "bfloat16"
                 or not supported_adapter or cfg.adapter.dtype != "bfloat16"
@@ -438,7 +473,7 @@ def validate_model_options(cfg):
                 or cfg.quant.group_size != -1 or cfg.quant.use_stochastic_rounding
                 or cfg.quant.dynamic_loss_threshold is not None):
             raise ValueError("Frozen SDNQ INT8 matmul input-gradient path requires MOSS BF16 "
-                             "PEFT LoRA/LoKr or bypass LyCORIS LoCon/LoKr, BF16 adapters and random initialization, "
+                             "PEFT LoRA/LoKr, bypass LyCORIS LoCon/LoKr, or LyCORIS DoRA, BF16 adapters and random initialization, "
                              "INT8 weights, group_size=-1, stochastic rounding off and no dynamic "
                              "loss threshold. Choose quant.preset='balanced' or 'fast' for the "
                              "quantization settings, or disable quantized matmul.")
@@ -574,7 +609,7 @@ def load_config(path: str | Path) -> Config:
             sections[f.name] = _build(_SECTIONS[f.name], data, f.name)
 
     cfg = Config(**sections)
-    if cfg.flow.cabal_shift:
+    if cfg.flow.cabal_shift or cfg.flow.res_shift:
         from .timestep_distribution import effective_shift
         for resolution in cfg.dataset.tiers:
             effective_shift(cfg.flow, resolution / 16, resolution / 16)
@@ -670,7 +705,8 @@ def load_config(path: str | Path) -> Config:
         )
     if cfg.train.caption_variations < 0:
         raise ValueError("caption_variations must be >= 0")
-    if cfg.train.caption_variations and not cfg.train.cache_text_embeddings:
+    if cfg.train.caption_variations and not cfg.train.cache_text_embeddings and not cfg.slider.enabled:
+        # A slider never builds a variation cache, so the setting is simply unused there.
         raise ValueError("caption_variations requires cache_text_embeddings=true")
     if cfg.train.cache_text_embeddings:
         from ..data.text_cache import validate_static_captions

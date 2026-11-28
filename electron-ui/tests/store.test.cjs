@@ -118,3 +118,21 @@ test('block LR preview waits for the latest block edit to resolve', async () => 
   await store.flush();
   assert.deepEqual(preview().multipliers, [0.3]);
 });
+
+test('failed config.edit removes failed pending patch instead of poisoning subsequent flushes', async () => {
+  const patches = [];
+  const store = loadStore(async (method, params) => {
+    if (method === 'config.edit') {
+      patches.push(params.patch);
+      if ('bad.key' in params.patch) throw new Error('Bad key');
+      return { flat: { ...params.patch } };
+    }
+    return true;
+  });
+  store.edit('bad.key', 1);
+  await assert.rejects(store.flush(), /Bad key/);
+  store.edit('good.key', 2);
+  await store.flush();
+  assert.equal(patches.length, 2);
+  assert.deepEqual(patches[1], { 'good.key': 2 });
+});

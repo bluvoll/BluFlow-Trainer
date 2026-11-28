@@ -95,7 +95,7 @@ def build_optimizer(groups: list[dict], cfg: OptimizerConfig) -> torch.optim.Opt
     if Version(version('sdnq')) < Version('0.2.8'):
         optimizer.register_step_pre_hook(_sdnq_kahan_alias)
         optimizer.register_step_post_hook(_sdnq_remove_kahan_alias)
-    elif version('sdnq') == '0.2.9':
+    else:
         from .sdnq_compat import migrate_optimizer_state
         optimizer.register_load_state_dict_pre_hook(migrate_optimizer_state)
     return optimizer
@@ -212,7 +212,8 @@ def _rerex_lambda(decay_steps: int, cfg: ScheduleConfig):
     return lr_lambda
 
 
-def _schedule_curve(cfg: ScheduleConfig, total_steps: int):
+def _schedule_curve(cfg: ScheduleConfig, total_steps: int, ticks_per_update: int = 1):
+    ticks = max(1, int(ticks_per_update))
     warmup = max(0, cfg.warmup_steps)
     decay_steps = max(1, total_steps - warmup)
     floor = cfg.min_lr_ratio
@@ -233,18 +234,21 @@ def _schedule_curve(cfg: ScheduleConfig, total_steps: int):
             raise ValueError(f"unknown schedule: {cfg.kind!r}")
 
     def lr_lambda(step: int) -> float:
-        if step < warmup:
-            # (step+1)/warmup rather than step/warmup: the sd-scripts form makes the first
-            # optimizer step a no-op at lr exactly 0.
-            return (step + 1) / max(1, warmup)
-        return decay(step - warmup)
+        update = step // ticks
+        if update < warmup:
+            # (update+1)/warmup rather than update/warmup: the sd-scripts form makes the first
+            # optimizer step a no-op at lr exactly 0. Using update=step//ticks keeps DDP warmup
+            # identical to single-GPU when Accelerate advances the scheduler `num_processes` times.
+            return (update + 1) / max(1, warmup)
+        return decay(update - warmup)
 
     return lr_lambda
 
 
-def build_scheduler(optimizer: torch.optim.Optimizer, cfg: ScheduleConfig, total_steps: int):
+def build_scheduler(optimizer: torch.optim.Optimizer, cfg: ScheduleConfig, total_steps: int,
+                    ticks_per_update: int = 1):
     """Apply the curve to each group's own peak LR. Steps are in Accelerate scheduler ticks."""
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, _schedule_curve(cfg, total_steps))
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, _schedule_curve(cfg, total_steps, ticks_per_update))
 
 
 class StageLRScheduler(torch.optim.lr_scheduler.LambdaLR):
@@ -254,8 +258,8 @@ class StageLRScheduler(torch.optim.lr_scheduler.LambdaLR):
         curves = []
         for updates in budgets:
             warmup = stage_warmup_steps(cfg.warmup_steps, updates)
-            scaled_cfg = replace(cfg, warmup_steps=warmup * ticks_per_update)
-            curves.append(_schedule_curve(scaled_cfg, updates * ticks_per_update))
+            scaled_cfg = replace(cfg, warmup_steps=warmup)
+            curves.append(_schedule_curve(scaled_cfg, updates, ticks_per_update))
 
         # LambdaLR saves the stage and origin with its clock. It recreates plain
         # functions from the config, so no closures are pickled in a checkpoint.

@@ -16,6 +16,7 @@ from sdnq.quant_utils import get_hadamard, rotate_hadamard_compiled
 from sdnq.training import SDNQTensor
 from sdnq.training.layers.linear.linear_int8.linear_int8 import get_int8_matmul_inputs
 from sdnq.training.layers.linear.linear_int8.linear_int8_dynamic import get_int8_matmul_dynamic_inputs
+from .int8_calibration import launch_scaled_mm, select_tile
 
 
 def _dynamic_helper(fn):
@@ -60,7 +61,6 @@ def _gemm(inputs):
     x, weight, x_scale, scale, bias, after, dtype, shape = inputs
     assert after is None
     if bias is None:
-        from .int8_calibration import select_tile, launch_scaled_mm
         tile = select_tile(x.device, x.shape[0], weight.shape[1], x.shape[1], weight.is_contiguous())
         if tile is not None:
             return launch_scaled_mm(x, weight, x_scale, scale, dtype, tile).view(shape)
@@ -104,6 +104,171 @@ def _autograd_backward(ctx, grad):
 
 
 _forward.register_autograd(_autograd_backward, setup_context=_setup_context)
+
+
+@torch.library.custom_op("bluflow::frozen_int8_qkv_forward", mutates_args=())
+def _forward_qkv(
+    x: torch.Tensor,
+    wq: torch.Tensor,
+    sq: torch.Tensor,
+    wk: torch.Tensor,
+    sk: torch.Tensor,
+    wv: torch.Tensor,
+    sv: torch.Tensor,
+    rotation: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Rotate and dynamically INT8-quantize `x` once, then reuse `(x_q, x_scale)` across Q/K/V.
+    x_q, wq_t, x_scale, sq_t, bias, after, dtype, shape_q = _forward_inputs(
+        x, wq, sq, hadamard=rotation, do_transpose=True
+    )
+    prefix = x.shape[:-1]
+    contiguous = wq_t.is_contiguous()
+    wk_t = wk.t().contiguous() if contiguous else wk.t()
+    wv_t = wv.t().contiguous() if contiguous else wv.t()
+    out_q = _gemm((x_q, wq_t, x_scale, sq_t, bias, after, dtype, shape_q))
+    out_k = _gemm((x_q, wk_t, x_scale, sk.t(), None, None, dtype, (*prefix, wk.shape[0])))
+    out_v = _gemm((x_q, wv_t, x_scale, sv.t(), None, None, dtype, (*prefix, wv.shape[0])))
+    return out_q, out_k, out_v
+
+
+@_forward_qkv.register_fake
+def _forward_qkv_fake(x, wq, sq, wk, sk, wv, sv, rotation):
+    prefix = x.shape[:-1]
+    return (
+        x.new_empty((*prefix, wq.shape[0])),
+        x.new_empty((*prefix, wk.shape[0])),
+        x.new_empty((*prefix, wv.shape[0])),
+    )
+
+
+def _single_pre_rot_backward(
+    grad: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, rotation: torch.Tensor | None
+) -> torch.Tensor:
+    shape = (*grad.shape[:-1], weight.shape[1])
+    decoded = dequantize_symmetric_compiled(weight, scale)
+    return _gemm(
+        _backward_inputs(
+            grad.flatten(0, -2), decoded, hadamard=rotation, output_shape=shape, do_input_reshape=False
+        )
+    )
+
+
+@torch.library.custom_op("bluflow::frozen_int8_qkv_backward", mutates_args=())
+def _backward_qkv(
+    gq: torch.Tensor,
+    gk: torch.Tensor,
+    gv: torch.Tensor,
+    wq: torch.Tensor,
+    sq: torch.Tensor,
+    wk: torch.Tensor,
+    sk: torch.Tensor,
+    wv: torch.Tensor,
+    sv: torch.Tensor,
+    rotation: torch.Tensor | None,
+) -> torch.Tensor:
+    dx = (
+        _single_pre_rot_backward(gq, wq, sq, rotation)
+        + _single_pre_rot_backward(gk, wk, sk, rotation)
+        + _single_pre_rot_backward(gv, wv, sv, rotation)
+    )
+    return _rotate(dx, hadamard=rotation) if rotation is not None else dx
+
+
+@_backward_qkv.register_fake
+def _backward_qkv_fake(gq, gk, gv, wq, sq, wk, sk, wv, sv, rotation):
+    return gq.new_empty((*gq.shape[:-1], wq.shape[1]))
+
+
+def _setup_qkv_context(ctx, inputs, output):
+    ctx.save_for_backward(*inputs[1:])
+
+
+def _autograd_qkv_backward(ctx, gq, gk, gv):
+    wq, sq, wk, sk, wv, sv, rotation = ctx.saved_tensors
+    if not all(g is not None for g in (gq, gk, gv)):
+        ref = next((g for g in (gq, gk, gv) if g is not None), None)
+        if ref is None:
+            return (None, None, None, None, None, None, None, None)
+        prefix = ref.shape[:-1]
+        if gq is None:
+            gq = ref.new_zeros((*prefix, wq.shape[0]))
+        if gk is None:
+            gk = ref.new_zeros((*prefix, wk.shape[0]))
+        if gv is None:
+            gv = ref.new_zeros((*prefix, wv.shape[0]))
+    dx = _backward_qkv(gq, gk, gv, wq, sq, wk, sk, wv, sv, rotation)
+    return dx, None, None, None, None, None, None, None
+
+
+_forward_qkv.register_autograd(_autograd_qkv_backward, setup_context=_setup_qkv_context)
+
+
+def _extract_qkv_part(mod):
+    if isinstance(mod, FrozenINT8Linear):
+        return (mod, None) if mod.bias is None else (None, None)
+    base = getattr(mod, "base_layer", None)
+    if (
+        isinstance(base, FrozenINT8Linear)
+        and base.bias is None
+        and not getattr(mod, "merged", False)
+        and not getattr(mod, "disable_adapters", False)
+        and not getattr(mod, "lora_variant", {})
+        and hasattr(mod, "lora_A")
+        and hasattr(mod, "lora_B")
+    ):
+        return base, mod
+    return None, None
+
+
+def _apply_peft_delta(base_out: torch.Tensor, x: torch.Tensor, mod) -> torch.Tensor:
+    if mod is None or getattr(mod, "disable_adapters", False):
+        return base_out
+    res = base_out
+    out_dtype = base_out.dtype
+    for active_adapter in mod.active_adapters:
+        if active_adapter not in mod.lora_A:
+            continue
+        lora_A = mod.lora_A[active_adapter]
+        x_in = mod._cast_input_dtype(x, lora_A.weight.dtype)
+        res = (
+            res
+            + mod.lora_B[active_adapter](lora_A(mod.lora_dropout[active_adapter](x_in)))
+            * mod.scaling[active_adapter]
+        )
+    return res.to(out_dtype)
+
+
+def apply_shared_frozen_qkv(mod_q, mod_k, mod_v, x: torch.Tensor):
+    """Compute Q, K, V projections sharing a single FrozenINT8Linear input prep/backward rotation.
+
+    Returns `(q, k, v)` when all three layers use compatible `FrozenINT8Linear` base layers
+    (directly or wrapped by vanilla PEFT LoRA), else `None` so callers can fall back.
+    """
+    bq, pq = _extract_qkv_part(mod_q)
+    bk, pk = _extract_qkv_part(mod_k)
+    bv, pv = _extract_qkv_part(mod_v)
+    if bq is None or bk is None or bv is None:
+        return None
+    rq, rk, rv = bq._sdnq_rotation, bk._sdnq_rotation, bv._sdnq_rotation
+    if (rq is None) != (rk is None) or (rq is None) != (rv is None):
+        return None
+    if rq is not None and (rq.shape != rk.shape or rq.shape != rv.shape):
+        return None
+    base_q, base_k, base_v = _forward_qkv(
+        x,
+        bq.weight,
+        bq._sdnq_scale,
+        bk.weight,
+        bk._sdnq_scale,
+        bv.weight,
+        bv._sdnq_scale,
+        rq,
+    )
+    return (
+        _apply_peft_delta(base_q, x, pq),
+        _apply_peft_delta(base_k, x, pk),
+        _apply_peft_delta(base_v, x, pv),
+    )
 
 
 class FrozenINT8Linear(nn.Linear):

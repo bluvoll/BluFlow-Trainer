@@ -13,6 +13,7 @@ from torch.utils.checkpoint import checkpoint
 from trainer.training.activation_offload import (
     checkpoint_with_offload, configure_activation_offload,
 )
+from trainer.training.frozen_matmul import apply_shared_frozen_qkv
 
 
 class _RMSNorm(nn.Module):
@@ -133,12 +134,17 @@ class _Block(nn.Module):
         y = self.norm1(x) * (1 + scale_a) + shift_a
         dtype = x.dtype
         y = y.to(dtype)
-        q = self.q_norm(self.proj["q"](y).unflatten(-1, (self.heads, -1))).flatten(2)
-        k = self.k_norm(self.proj["k"](y).unflatten(-1, (self.heads, -1))).flatten(2)
+        qkv = apply_shared_frozen_qkv(self.proj["q"], self.proj["k"], self.proj["v"], y)
+        if qkv is not None:
+            q_raw, k_raw, v_raw = qkv
+        else:
+            q_raw, k_raw, v_raw = self.proj["q"](y), self.proj["k"](y), self.proj["v"](y)
+        q = self.q_norm(q_raw.unflatten(-1, (self.heads, -1))).flatten(2)
+        k = self.k_norm(k_raw.unflatten(-1, (self.heads, -1))).flatten(2)
         x = (
             x
             + self.proj["o"](
-                _attention(q, k, self.proj["v"](y), rope, self.heads, packed)
+                _attention(q, k, v_raw, rope, self.heads, packed)
             )
             * gate_a
         )

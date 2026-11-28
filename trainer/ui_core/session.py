@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .config import bridge, descriptors, normalize, evaluate
 from .metrics import parse_step, REPORT_RE, compact_records
+from .rules import captions_optional
 from .paths import PROJECT_ROOT, safe_stem
 from .preferences import Preferences
 from .process import (
@@ -85,6 +86,8 @@ class Session:
         ]
         self.flat = normalize(bridge.defaults())
         self.path = None
+        self._saved_single_path = None
+        self._saved_single_mask_path = None
         self.external = []
         self.storage = tempfile.TemporaryDirectory(prefix="bluflow-desktop-")
         self.entries: list[QueueEntry] = []
@@ -213,7 +216,8 @@ class Session:
         if values.get("adapter.kind") == "lycoris_lora" and "train.compile" not in flat:
             values["train.compile"] = "default"
         with self.lock:
-            self.flat, self.path = normalize(values), path
+            self.flat, self.path, self._saved_single_path = normalize(values), path, None
+            self._saved_single_mask_path = None
             if path not in self.external:
                 self.external.append(path)
         self.log(f"Loaded {path}")
@@ -225,7 +229,20 @@ class Session:
         ):
             raise ValueError("Unknown configuration field")
         with self.lock:
-            self.flat = normalize(self.flat | patch, self.flat)
+            had_subsets = bool(self.flat.get("dataset.subsets"))
+            if not had_subsets and patch.get("dataset.subsets"):
+                self._saved_single_path = self.flat.get("dataset.path")
+                self._saved_single_mask_path = self.flat.get("dataset.mask_path")
+            merged = self.flat | patch
+            if had_subsets and "dataset.subsets" in patch and not patch.get("dataset.subsets"):
+                if "dataset.path" not in patch and self._saved_single_path is not None:
+                    merged["dataset.path"] = self._saved_single_path
+                if (
+                    "dataset.mask_path" not in patch
+                    and getattr(self, "_saved_single_mask_path", None) is not None
+                ):
+                    merged["dataset.mask_path"] = self._saved_single_mask_path
+            self.flat = normalize(merged, self.flat)
         return self.state()
 
     def save(self, destination=None, overwrite=False):
@@ -435,6 +452,7 @@ class Session:
         )
 
     def cache_jobs(self, flat, dry=False):
+        devices = ",".join(map(str, self.selected)) if len(self.selected) > 1 else ""
         return [
             Job(
                 cache_launch(
@@ -448,10 +466,12 @@ class Session:
                     upscale=not flat.get("dataset.bucket_no_upscale", True),
                     multires_training=bool(flat.get("dataset.multires_training")),
                     gpus=self.gpu_arg(),
+                    devices=devices,
                     vae_path=flat.get("train.vae_path"),
                     flux2_vae=bool(flat.get("train.flux2_vae")),
                     model_family=flat.get("train.model_family") or "auto",
                     cache_validation=flat.get("dataset.cache_validation") or "warn",
+                    allow_missing_captions=captions_optional(flat),
                     dry_run=dry,
                 )
             )
@@ -480,7 +500,8 @@ class Session:
         ):
             raise ValueError(f"Duplicate output directory/run_name: {destination}")
         self.reservations[destination] = entry.id
-        return flat, toolchain_jobs(entry.snapshot) + self.cache_jobs(flat) + [
+        cache = [] if flat.get("dataset.source") in ("latents", "encode") else self.cache_jobs(flat)
+        return flat, toolchain_jobs(entry.snapshot) + cache + [
             Job(train_launch(entry.snapshot, len(self.selected)), training=True)
         ]
 
@@ -503,9 +524,10 @@ class Session:
             else:
                 path = Path(self.storage.name) / f"run-{time.time_ns()}.toml"
                 bridge.write_toml(path, flat)
+            cache = [] if flat.get("dataset.source") in ("latents", "encode") else self.cache_jobs(flat)
             jobs = (
                 toolchain_jobs(path)
-                + self.cache_jobs(flat)
+                + cache
                 + [Job(train_launch(path, len(self.selected)), training=True)]
             )
         elif action in ("cache", "dry-run"):

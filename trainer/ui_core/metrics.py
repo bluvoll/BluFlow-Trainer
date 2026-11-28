@@ -19,7 +19,7 @@ STEP_RE = re.compile(
 
 # Startup summary lines worth surfacing on the metrics tab rather than leaving in the console.
 REPORT_RE = re.compile(
-    r"^(dataset|steps|stage|mode|params|quant|flow|sched|compile|optim|hf loss)\s{2,}"
+    r"^(dataset|steps|stage|mode|slider|params|quant|flow|sched|compile|optim|hf loss)\s{2,}"
 )
 
 

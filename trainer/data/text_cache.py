@@ -6,6 +6,9 @@ from .caption import MIX_DEFAULTS
 
 
 def validate_static_captions(cfg):
+    if getattr(getattr(cfg, "slider", None), "enabled", False):
+        # Slider steps never read dataset captions; only the slider's fixed prompts are cached.
+        return
     caption = cfg.dataset.caption
     changing = [
         name
@@ -42,7 +45,7 @@ class TextEmbeddingCache:
 
     def get(self, captions, device, dtype):
         values = [self.embeddings[c] for c in captions]
-        hidden = pad_sequence(values, batch_first=True).to(device=device, dtype=dtype)
+        hidden = pad_sequence(values, batch_first=True).to(device=device, dtype=dtype, non_blocking=True)
         lengths = torch.tensor([v.shape[0] for v in values], device=device)
         mask = torch.arange(hidden.shape[1], device=device)[None] < lengths[:, None]
         return hidden, mask
